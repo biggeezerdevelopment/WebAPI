@@ -438,6 +438,111 @@ func TestLaggingOutputDoesNotStarveHealthyOne(t *testing.T) {
 	wantIDs(t, healthy, events[total-4].ID, events[total-3].ID, events[total-2].ID, events[total-1].ID)
 }
 
+func TestCheckpointSecondLargerThanWindowStillAdvances(t *testing.T) {
+	// One timestamp holds more events than a capped window, and the delivered
+	// prefix alone fills that window.
+	total := maxPagesPerWindow + 50
+	delivered := maxPagesPerWindow + 10
+	ts := ms(-5000)
+	events := make([]testEvent, 0, total+1)
+	var ids, want []string
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("e%05d", i)
+		events = append(events, testEvent{id, ts})
+		if i < delivered {
+			ids = append(ids, id)
+		} else {
+			want = append(want, id)
+		}
+	}
+	events = append(events, testEvent{"later", ms(-1000)})
+	want = append(want, "later")
+
+	a := newAuditServer(t, events...)
+	a.perPage = 1
+	out := &fakeOutput{}
+	c := build(t, a, t.TempDir(), map[string]*fakeOutput{"o": out})
+	c.state["o"] = checkpoint{TimestampMS: ts, IDs: ids}
+
+	poll(t, c)
+	wantIDs(t, out, want...)
+	poll(t, c)
+	wantIDs(t, out, want...)
+}
+
+func TestOutputCheckpointedAtTruncatedWindowEndIsServed(t *testing.T) {
+	total := maxPagesPerWindow + 5
+	events := make([]testEvent, total)
+	for i := range events {
+		events[i] = testEvent{fmt.Sprintf("e%05d", i), ms(int64(i-total) * 1000)}
+	}
+	a := newAuditServer(t, events...)
+	a.perPage = 1
+	lagging := &fakeOutput{failAt: func(string) bool { return true }}
+	atEnd := &fakeOutput{}
+	c := build(t, a, t.TempDir(), map[string]*fakeOutput{"lagging": lagging, "atEnd": atEnd})
+	c.state["lagging"] = checkpoint{TimestampMS: events[0].TS - 1}
+	last := events[maxPagesPerWindow-1]
+	c.state["atEnd"] = checkpoint{TimestampMS: last.TS, IDs: []string{last.ID}}
+
+	poll(t, c)
+	var want []string
+	for _, ev := range events[maxPagesPerWindow:] {
+		want = append(want, ev.ID)
+	}
+	wantIDs(t, atEnd, want...)
+}
+
+// stuckFetcher serves endless pages that never pass one timestamp.
+type stuckFetcher struct {
+	ts    int64
+	calls int
+}
+
+func (s *stuckFetcher) FetchPage(_ context.Context, pageURL string) (*api.Page, error) {
+	s.calls++
+	header := http.Header{}
+	base, _, _ := strings.Cut(pageURL, "?")
+	header.Set("Link", fmt.Sprintf(`<%s?after=%d>; rel="next"`, base, s.calls))
+	body := fmt.Sprintf(`[{"_document_id":"e%d","@timestamp":%d}]`, s.calls, s.ts)
+	return &api.Page{StatusCode: http.StatusOK, Header: header, Body: []byte(body)}, nil
+}
+
+func TestNoProgressFailsLoudly(t *testing.T) {
+	a := newAuditServer(t)
+	out := &fakeOutput{}
+	c := build(t, a, t.TempDir(), map[string]*fakeOutput{"o": out})
+	ts := ms(-5000)
+	c.state["o"] = checkpoint{TimestampMS: ts}
+	stuck := &stuckFetcher{ts: ts}
+	c.opts.Fetcher = stuck
+
+	err := c.Poll(context.Background())
+	c.Wait()
+	if err == nil || !strings.Contains(err.Error(), "no progress") {
+		t.Fatalf("err = %v, want a no-progress error", err)
+	}
+	if stuck.calls != maxPagesPastFloor {
+		t.Fatalf("fetched %d pages, want %d", stuck.calls, maxPagesPastFloor)
+	}
+	wantIDs(t, out)
+}
+
+func TestRetryAfterOnServerError(t *testing.T) {
+	unavailable := &api.Page{StatusCode: http.StatusServiceUnavailable, Header: http.Header{"Retry-After": {"120"}}}
+	if wait, limited := rateLimitWait(unavailable, testNow); !limited || wait != 2*time.Minute {
+		t.Errorf("503 with Retry-After: wait = %v, limited = %v", wait, limited)
+	}
+	plain := &api.Page{StatusCode: http.StatusServiceUnavailable, Header: http.Header{}}
+	if _, limited := rateLimitWait(plain, testNow); limited {
+		t.Error("503 without Retry-After treated as rate limit")
+	}
+	notFound := &api.Page{StatusCode: http.StatusNotFound, Header: http.Header{"Retry-After": {"120"}}}
+	if _, limited := rateLimitWait(notFound, testNow); limited {
+		t.Error("404 with Retry-After treated as rate limit")
+	}
+}
+
 func TestCaughtUpOutputIsServedBeforeFailedBacklogFetch(t *testing.T) {
 	a := newAuditServer(t, testEvent{"old", ms(-7200_000)}, testEvent{"new", ms(-1000)})
 	healthy := &fakeOutput{}

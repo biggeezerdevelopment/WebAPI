@@ -22,8 +22,11 @@ import (
 )
 
 const (
-	// maxPagesPerWindow bounds the events held in memory by one fetch.
+	// maxPagesPerWindow is where a fetch stops once it has passed its floor.
 	maxPagesPerWindow = 100
+	// maxPagesPastFloor ends a fetch that still has not passed its floor. The
+	// poll then fails loudly instead of refetching a delivered prefix forever.
+	maxPagesPastFloor = 10000
 	// maxRateLimitRetries is the number of waits for one page within a poll.
 	maxRateLimitRetries = 3
 	// maxInlineWait is the longest rate-limit wait spent inside a poll. Longer
@@ -172,7 +175,8 @@ func (c *Collector) Poll(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		// The output at floor is always served, so the loop terminates.
+		// A truncated window always ends after floor, so the output at floor is
+		// always served and the loop terminates.
 		end := floor
 		if len(events) > 0 && events[len(events)-1].ts > end {
 			end = events[len(events)-1].ts
@@ -181,7 +185,9 @@ func (c *Collector) Poll(ctx context.Context) error {
 		nowMS := c.now().UnixMilli()
 		for _, out := range c.opts.Outputs {
 			cp, ok := pending[out.Name]
-			if !ok || cp.TimestampMS < floor || (!complete && cp.TimestampMS > end) {
+			// A truncated window may hold only part of the events at end, so an
+			// output checkpointed there gets its own fetch.
+			if !ok || cp.TimestampMS < floor || (!complete && cp.TimestampMS >= end) {
 				continue
 			}
 			delete(pending, out.Name)
@@ -331,7 +337,10 @@ func (c *Collector) advance(name string, ev event) error {
 }
 
 // fetchWindow reads pages from floor and returns events sorted by timestamp
-// then ID, without duplicates. complete is false when the page cap was reached.
+// then ID, without duplicates. complete is false when the page cap was reached,
+// and a truncated window always holds an event newer than floor. Without that,
+// a second with more events than the cap would be refetched forever. Events
+// before floor are dropped while paging because no output served here needs them.
 func (c *Collector) fetchWindow(ctx context.Context, floor int64) ([]event, bool, error) {
 	first, err := c.firstPageURL(floor)
 	if err != nil {
@@ -342,7 +351,8 @@ func (c *Collector) fetchWindow(ctx context.Context, floor int64) ([]event, bool
 	seen := map[string]bool{first.String(): true}
 	current := first
 	complete := false
-	for pages := 0; pages < maxPagesPerWindow; pages++ {
+	passedFloor := false
+	for pages := 1; ; pages++ {
 		page, err := c.fetchPage(ctx, current.String())
 		if err != nil {
 			return nil, false, err
@@ -351,7 +361,14 @@ func (c *Collector) fetchWindow(ctx context.Context, floor int64) ([]event, bool
 		if err != nil {
 			return nil, false, err
 		}
-		events = append(events, parsed...)
+		for _, ev := range parsed {
+			if ev.ts >= floor {
+				events = append(events, ev)
+			}
+			if ev.ts > floor {
+				passedFloor = true
+			}
+		}
 
 		next, err := nextPageURL(current, page.Header)
 		if err != nil {
@@ -360,6 +377,12 @@ func (c *Collector) fetchWindow(ctx context.Context, floor int64) ([]event, bool
 		if next == nil {
 			complete = true
 			break
+		}
+		if pages >= maxPagesPerWindow && passedFloor {
+			break
+		}
+		if pages >= maxPagesPastFloor {
+			return nil, false, fmt.Errorf("no progress possible: %d pages did not pass the checkpoint, increase per_page", pages)
 		}
 		if seen[next.String()] {
 			return nil, false, errors.New("pagination loop detected")
@@ -440,13 +463,18 @@ func (c *Collector) fetchPage(ctx context.Context, pageURL string) (*api.Page, e
 }
 
 // rateLimitWait reports whether a response is a rate limit and how long to
-// wait. A 403 without any limit signal is an authorization failure.
+// wait. A 403 without any limit signal is an authorization failure. A server
+// error counts only when it carries Retry-After.
 func rateLimitWait(page *api.Page, now time.Time) (time.Duration, bool) {
-	if page.StatusCode != http.StatusTooManyRequests && page.StatusCode != http.StatusForbidden {
+	limitStatus := page.StatusCode == http.StatusTooManyRequests || page.StatusCode == http.StatusForbidden
+	if !limitStatus && page.StatusCode < http.StatusInternalServerError {
 		return 0, false
 	}
 	if wait, ok := parseRetryAfter(page.Header.Get("Retry-After"), now); ok {
 		return clampWait(wait), true
+	}
+	if !limitStatus {
+		return 0, false
 	}
 	if page.Header.Get("X-RateLimit-Remaining") == "0" {
 		if reset, err := strconv.ParseInt(page.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
