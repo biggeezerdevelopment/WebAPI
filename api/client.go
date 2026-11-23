@@ -1,9 +1,7 @@
 package api
 
 import (
-	"bytes"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,19 +35,17 @@ func NewClient(apiConfig *config.WebAPI) *Client {
 }
 
 func (c *Client) SendRequest() ([]byte, error) {
-	var jsonData []byte
-	var err error
+	// Body is already serialized, so it is sent as is. The reader stays a nil
+	// interface when Body is empty so that the request carries no body.
+	var body io.Reader
 	if c.config.Body != "" {
-		jsonData, err = json.Marshal(c.config.Body)
-		if err != nil {
-			return nil, fmt.Errorf("error marshalling body: %v", err)
-		}
+		body = strings.NewReader(c.config.Body)
 	}
 
 	req, err := http.NewRequest(
 		strings.ToUpper(c.config.Method),
 		c.config.Endpoint,
-		bytes.NewBuffer(jsonData),
+		body,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("error creating request: %v", err)
