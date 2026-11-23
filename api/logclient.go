@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"webapi/config"
@@ -57,7 +58,7 @@ func (c *LogClient) SendLog(agentID, agentName, source string, apiResults interf
 	}
 
 	req, err := http.NewRequest(
-		c.config.APIMethod,
+		strings.ToUpper(c.config.APIMethod),
 		c.config.APIURL,
 		bytes.NewBuffer(jsonData),
 	)
