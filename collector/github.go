@@ -33,7 +33,18 @@ const (
 	maxRateLimitWait = 24 * time.Hour
 	// defaultRateLimitWait applies when a limit response gives no delay.
 	defaultRateLimitWait = time.Minute
+	// maxOutputBackoff caps the wait before retrying a failing output, which
+	// bounds what its backlog fetches cost against the rate limit.
+	maxOutputBackoff = time.Hour
+	// fetchGroupSpan is how far apart checkpoints can be and still share a fetch.
+	fetchGroupSpan = time.Hour
 )
+
+// outputRetry tracks consecutive failed delivery attempts for one output.
+type outputRetry struct {
+	failures  int
+	notBefore time.Time
+}
 
 // PageFetcher retrieves one URL. api.Client implements it.
 type PageFetcher interface {
@@ -63,10 +74,11 @@ type Collector struct {
 	sleep     func(context.Context, time.Duration) error
 	notBefore time.Time // used only by the polling goroutine
 
-	mu    sync.Mutex // guards state and busy, and serializes saves
-	state map[string]checkpoint
-	busy  map[string]bool
-	wg    sync.WaitGroup
+	mu      sync.Mutex // guards state, busy and retries, and serializes saves
+	state   map[string]checkpoint
+	busy    map[string]bool
+	retries map[string]outputRetry
+	wg      sync.WaitGroup
 }
 
 // New loads the source's state and gives every routed output without a
@@ -104,6 +116,7 @@ func newCollector(opts Options, now func() time.Time) (*Collector, error) {
 		sleep:     sleepContext,
 		state:     state,
 		busy:      make(map[string]bool),
+		retries:   make(map[string]outputRetry),
 	}, nil
 }
 
@@ -126,38 +139,40 @@ func (c *Collector) Wait() { c.wg.Wait() }
 
 // Poll fetches new events and starts one delivery per idle output. It does not
 // wait for them, so a slow output cannot hold back the others. An output still
-// delivering is skipped and picks up from its checkpoint on a later poll.
+// delivering, or waiting out a failure backoff, is skipped and picks up from
+// its checkpoint on a later poll.
 //
-// A fetch is capped, so one lagging output could otherwise keep the window
-// pinned to old events forever. Outputs beyond the window's end are served by
-// another fetch starting from their own checkpoint.
+// Fetches run newest checkpoint first, with failing outputs last, so a deep
+// backlog cannot spend the rate limit before caught-up outputs are served.
 func (c *Collector) Poll(ctx context.Context) error {
-	if c.now().Before(c.notBefore) {
+	current := c.now()
+	if current.Before(c.notBefore) {
 		return nil
 	}
 
 	c.mu.Lock()
 	pending := make(map[string]checkpoint)
+	failing := make(map[string]bool)
 	for _, out := range c.opts.Outputs {
-		if !c.busy[out.Name] {
-			pending[out.Name] = c.state[out.Name]
+		if c.busy[out.Name] {
+			continue
 		}
+		retry, retrying := c.retries[out.Name]
+		if retrying && current.Before(retry.notBefore) {
+			continue
+		}
+		pending[out.Name] = c.state[out.Name]
+		failing[out.Name] = retrying
 	}
 	c.mu.Unlock()
 
 	for len(pending) > 0 {
-		floor := int64(-1)
-		for _, cp := range pending {
-			if floor < 0 || cp.TimestampMS < floor {
-				floor = cp.TimestampMS
-			}
-		}
-
+		floor := nextFloor(pending, failing)
 		events, complete, err := c.fetchWindow(ctx, floor)
 		if err != nil {
 			return err
 		}
-		// The oldest output is always served, so the loop terminates.
+		// The output at floor is always served, so the loop terminates.
 		end := floor
 		if len(events) > 0 && events[len(events)-1].ts > end {
 			end = events[len(events)-1].ts
@@ -166,7 +181,7 @@ func (c *Collector) Poll(ctx context.Context) error {
 		nowMS := c.now().UnixMilli()
 		for _, out := range c.opts.Outputs {
 			cp, ok := pending[out.Name]
-			if !ok || (!complete && cp.TimestampMS > end) {
+			if !ok || cp.TimestampMS < floor || (!complete && cp.TimestampMS > end) {
 				continue
 			}
 			delete(pending, out.Name)
@@ -176,6 +191,60 @@ func (c *Collector) Poll(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// nextFloor picks where the next fetch starts: the oldest checkpoint within
+// fetchGroupSpan of the newest one, preferring outputs that are not failing.
+// Grouping nearby outputs lets them share one fetch.
+func nextFloor(pending map[string]checkpoint, failing map[string]bool) int64 {
+	onlyFailing := true
+	for name := range pending {
+		if !failing[name] {
+			onlyFailing = false
+			break
+		}
+	}
+	newest := int64(-1)
+	for name, cp := range pending {
+		if failing[name] == onlyFailing && cp.TimestampMS > newest {
+			newest = cp.TimestampMS
+		}
+	}
+	floor := newest
+	for name, cp := range pending {
+		if failing[name] == onlyFailing && cp.TimestampMS < floor &&
+			cp.TimestampMS >= newest-fetchGroupSpan.Milliseconds() {
+			floor = cp.TimestampMS
+		}
+	}
+	return floor
+}
+
+// recordOutcome updates an output's backoff after a delivery attempt. The first
+// failure retries on the next poll. Repeats double the wait, and a failure
+// after some progress starts the count again.
+func (c *Collector) recordOutcome(name string, failed, progressed bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !failed {
+		delete(c.retries, name)
+		return
+	}
+	failures := c.retries[name].failures + 1
+	if progressed {
+		failures = 1
+	}
+	var wait time.Duration
+	if failures > 1 {
+		wait = time.Duration(c.opts.Source.SleepTime) * time.Second
+		for i := 1; i < failures && wait < maxOutputBackoff; i++ {
+			wait *= 2
+		}
+		if wait > maxOutputBackoff {
+			wait = maxOutputBackoff
+		}
+	}
+	c.retries[name] = outputRetry{failures: failures, notBefore: c.now().Add(wait)}
 }
 
 // selectEvents returns sorted events after cp. Events stamped later than the
@@ -219,7 +288,7 @@ func (c *Collector) startDelivery(ctx context.Context, out output.NamedOutput, b
 // before the next send, so a restart repeats at most the record in flight.
 func (c *Collector) deliver(ctx context.Context, out output.NamedOutput, batch []event) {
 	source := c.opts.Source.Name
-	for _, ev := range batch {
+	for i, ev := range batch {
 		if ctx.Err() != nil {
 			return
 		}
@@ -231,14 +300,20 @@ func (c *Collector) deliver(ctx context.Context, out output.NamedOutput, batch [
 			Data:      ev.data,
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				return // Shutdown is not an output failure.
+			}
 			log.Printf("Error delivering event from collector %q to output %q, will resume from its checkpoint: %v", source, out.Name, err)
+			c.recordOutcome(out.Name, true, i > 0)
 			return
 		}
 		if err := c.advance(out.Name, ev); err != nil {
 			log.Printf("Error saving checkpoint for collector %q output %q: %v", source, out.Name, err)
+			c.recordOutcome(out.Name, true, i > 0)
 			return
 		}
 	}
+	c.recordOutcome(out.Name, false, true)
 }
 
 func (c *Collector) advance(name string, ev event) error {

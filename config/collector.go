@@ -175,13 +175,15 @@ func (c *Config) validateCollectors() error {
 	return nil
 }
 
-// collectorWarnings flags routes that cannot confirm delivery.
+// collectorWarnings flags routes that cannot confirm delivery. Syslog has no
+// application acknowledgement on any transport: a stream write succeeds once
+// the frame is in the local socket buffer.
 func (c *Config) collectorWarnings() []string {
-	udp := make(map[string]bool)
+	syslogNetworks := make(map[string]string)
 	for i := range c.LogOutputs {
 		o := &c.LogOutputs[i]
-		if o.Enabled && o.Type == OutputTypeSyslog && o.Network == SyslogNetworkUDP {
-			udp[o.Name] = true
+		if o.Enabled && o.Type == OutputTypeSyslog {
+			syslogNetworks[o.Name] = o.Network
 		}
 	}
 	var warnings []string
@@ -191,8 +193,14 @@ func (c *Config) collectorWarnings() []string {
 			continue
 		}
 		for _, name := range c.RoutesFor(entry) {
-			if udp[name] {
+			network, isSyslog := syslogNetworks[name]
+			if !isSyslog {
+				continue
+			}
+			if network == SyslogNetworkUDP {
 				warnings = append(warnings, fmt.Sprintf("collector %q routes to UDP output %q, which cannot confirm delivery", entry.Name, name))
+			} else {
+				warnings = append(warnings, fmt.Sprintf("collector %q routes to syslog output %q, which has no delivery acknowledgement: events written during a silent network outage can be lost", entry.Name, name))
 			}
 		}
 	}

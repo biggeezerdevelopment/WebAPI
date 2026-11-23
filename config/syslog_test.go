@@ -172,6 +172,30 @@ func TestSyslogWarnings(t *testing.T) {
 	}
 }
 
+func TestCollectorWarnsForEverySyslogTransport(t *testing.T) {
+	for _, network := range []string{SyslogNetworkTLS, SyslogNetworkTCP, SyslogNetworkUDP} {
+		out := validSyslog()
+		out.Name, out.Network = "soc", network
+		hook := LogOutput{Enabled: true, Name: "hook", Type: "webhook"}
+		cfg := &Config{
+			LogOutputs: []LogOutput{out, hook},
+			WebAPI: []WebAPI{{
+				Enabled: true, Name: "audit", Collector: &Collector{},
+				Outputs: []string{"soc", "hook"},
+			}},
+		}
+		var matched []string
+		for _, warning := range cfg.collectorWarnings() {
+			if strings.Contains(warning, `collector "audit"`) {
+				matched = append(matched, warning)
+			}
+		}
+		if len(matched) != 1 || !strings.Contains(matched[0], `"soc"`) {
+			t.Errorf("%s: warnings = %v", network, matched)
+		}
+	}
+}
+
 func TestSyslogPriority(t *testing.T) {
 	for _, tt := range []struct {
 		facility, severity string

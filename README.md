@@ -152,7 +152,7 @@ logoutputs:
 
 ### GitHub Audit Log Collector
 
-A `webapi` entry with a `collector` polls a GitHub organization audit log and delivers each event as its own record, in `@timestamp` order and at least once. The API requires an organization plan that includes it and a token with audit log access.
+A `webapi` entry with a `collector` polls a GitHub organization audit log and delivers each event as its own record, in `@timestamp` order. Delivery is at least once to outputs that confirm receipt, such as a webhook. Syslog cannot confirm receipt, as described below. The API requires an organization plan that includes it and a token with audit log access.
 
 ```yaml
 state_dir: "./state"
@@ -185,11 +185,13 @@ webapi:
 - `api_key_env` works on any `webapi` entry and cannot be combined with `api_key`. The variable must be set and non-empty at startup.
 - A collector requires `method: get`, `auth_type: apikey`, a usable `state_dir`, and at least one output. Its endpoint must have no query string. It manages `after`, `before`, and the `created:` qualifier, so they cannot be configured. Other `phrase` filters are kept.
 - Each output has its own checkpoint: the newest delivered timestamp and the event IDs delivered at that timestamp. An output's batch stops at its first failed record and resumes from its checkpoint on a later poll, so one output being down does not block another or lose its backlog while GitHub retains the events.
+- Caught-up outputs are fetched first. An output that keeps failing is retried with a doubling delay of up to one hour, so its backlog fetches do not use up the GitHub rate limit. The delay resets when the output makes progress or the agent restarts.
 - An output with no checkpoint starts `initial_lookback_hours` back. That start is saved immediately, and adding an output does not change any other output's checkpoint.
 - A failed poll forwards nothing. `Link` pagination, `Retry-After`, and rate-limit headers are honored. Pagination links to another origin and redirects are refused so the token stays with the configured host.
 - State is saved atomically in `state_dir`, one file per source. A corrupt file, or a checkpoint that is negative or in the future, stops startup. Run only one agent per `state_dir`.
-- A record that fails permanently, such as one too large for UDP syslog, holds that output at that record until the cause is fixed. UDP also cannot confirm receipt, so the agent logs a startup warning when a collector routes to it. Use `tls` for at-least-once delivery.
-- An event GitHub publishes with a timestamp older than an output's checkpoint is not delivered to that output.
+- A record that fails permanently, such as one too large for UDP syslog, holds that output at that record until the cause is fixed.
+- Syslog has no application-level acknowledgement, so the agent logs a startup warning when a collector routes to it on any transport. Over `tls` or `tcp`, a write succeeds once it reaches the local socket buffer, so events written during a silent peer hang or network partition can be lost even though their checkpoint advances. A closed connection is detected and retried. UDP confirms nothing. Use a webhook output where at-least-once delivery is required.
+- An event GitHub publishes with a timestamp older than an output's checkpoint is not delivered to that output, because delivering it would break timestamp order.
 
 ## Building
 

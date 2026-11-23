@@ -438,6 +438,67 @@ func TestLaggingOutputDoesNotStarveHealthyOne(t *testing.T) {
 	wantIDs(t, healthy, events[total-4].ID, events[total-3].ID, events[total-2].ID, events[total-1].ID)
 }
 
+func TestCaughtUpOutputIsServedBeforeFailedBacklogFetch(t *testing.T) {
+	a := newAuditServer(t, testEvent{"old", ms(-7200_000)}, testEvent{"new", ms(-1000)})
+	healthy := &fakeOutput{}
+	lagging := &fakeOutput{}
+	c := build(t, a, t.TempDir(), map[string]*fakeOutput{"healthy": healthy, "lagging": lagging})
+	c.state["healthy"] = checkpoint{TimestampMS: ms(-2000)}
+	c.state["lagging"] = checkpoint{TimestampMS: ms(-7300_000)}
+
+	// The backlog query fails the way an exhausted rate limit would.
+	backlogFloor := time.UnixMilli(ms(-7300_000)).UTC().Format("2006-01-02T15:04:05Z")
+	a.setHandler(func(w http.ResponseWriter, r *http.Request) bool {
+		if strings.Contains(r.URL.Query().Get("phrase"), backlogFloor) {
+			w.WriteHeader(http.StatusInternalServerError)
+			return true
+		}
+		return false
+	})
+
+	if err := c.Poll(context.Background()); err == nil {
+		t.Fatal("expected the backlog fetch error")
+	}
+	c.Wait()
+	wantIDs(t, healthy, "new")
+	wantIDs(t, lagging)
+}
+
+func TestFailingOutputBacksOffAndRecovers(t *testing.T) {
+	a := newAuditServer(t, testEvent{"a", ms(-1000)})
+	down := &fakeOutput{failAt: func(string) bool { return true }}
+	c := build(t, a, t.TempDir(), map[string]*fakeOutput{"down": down})
+	clock := testNow
+	c.now = func() time.Time { return clock }
+
+	poll(t, c) // First failure: retried on the next poll.
+	poll(t, c) // Second failure: waits two polling intervals.
+	before := a.requestCount()
+	poll(t, c)
+	if got := a.requestCount(); got != before {
+		t.Fatalf("fetched %d pages during backoff", got-before)
+	}
+
+	down.setFail(nil)
+	clock = clock.Add(2 * time.Second)
+	poll(t, c)
+	wantIDs(t, down, "a")
+	if _, retrying := c.retries["down"]; retrying {
+		t.Fatal("backoff not cleared after a successful delivery")
+	}
+}
+
+func TestBackoffIsCapped(t *testing.T) {
+	a := newAuditServer(t)
+	c := build(t, a, t.TempDir(), map[string]*fakeOutput{"o": {}})
+	for i := 0; i < 80; i++ {
+		c.recordOutcome("o", true, false)
+	}
+	if got := c.retries["o"].notBefore.Sub(testNow); got != maxOutputBackoff {
+		t.Fatalf("backoff = %s, want %s", got, maxOutputBackoff)
+	}
+}
+
 func TestFutureEventIsHeldBack(t *testing.T) {
 	dir := t.TempDir()
 	a := newAuditServer(t, testEvent{"a", ms(-1000)}, testEvent{"future", ms(5000)})

@@ -65,6 +65,8 @@ apilogremote:
 
 # GitHub organization audit log source, added under webapi. The token needs
 # audit log access and is read from the environment. Do not set api_key too.
+# Syslog has no delivery acknowledgement, even over TLS, so events written during
+# a silent network outage can be lost. A webhook output confirms each record.
 #    - enabled: true
 #      name: "github-audit"
 #      subject: "GitHubAudit"
