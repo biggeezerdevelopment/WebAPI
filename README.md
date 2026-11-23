@@ -46,10 +46,13 @@ apilogremote:
     enabled: false               # Enable/disable remote logging
     api_url: "http://localhost:8080/api/v1/logs"
     api_method: "POST"
+    skip_verify: false           # Skip TLS certificate verification (default: false)
     api_headers:
         - key: "Content-Type"
           value: "application/json"
 ```
+
+TLS certificates from the remote log server are verified by default. Set `skip_verify: true` only for a trusted server with a self-signed or otherwise unverifiable certificate, because it leaves log traffic and API headers open to interception.
 
 ### WebAPI Configuration
 ```yaml

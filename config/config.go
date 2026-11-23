@@ -35,6 +35,7 @@ type APILogRemote struct {
 	APIURL     string   `yaml:"api_url"`
 	APIMethod  string   `yaml:"api_method"`
 	APIHeaders []Header `yaml:"api_headers"`
+	SkipVerify bool     `yaml:"skip_verify"`
 }
 
 type JarvisAgent struct {
