@@ -7,7 +7,7 @@ apilogremote:
     api_url: "http://localhost:8080/api/v1/logs"
     #api_key: "1234567890"
     #api_timeout: 30
-    #api_skip_verify: True
+    #skip_verify: False
     #api_auth_type: "apikey"
     #api_username: "admin"
     #api_password: "password"

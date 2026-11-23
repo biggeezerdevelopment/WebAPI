@@ -28,7 +28,7 @@ type LogPayload struct {
 func NewLogClient(logConfig *config.APILogRemote) *LogClient {
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, // Consider making this configurable
+			InsecureSkipVerify: logConfig.SkipVerify,
 		},
 	}
 
