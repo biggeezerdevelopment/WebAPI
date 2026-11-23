@@ -60,7 +60,7 @@ func (r *retrying) Send(ctx context.Context, rec Record) error {
 		if err == nil {
 			return nil
 		}
-		if attempt > maxRetries || ctx.Err() != nil {
+		if attempt > maxRetries || ctx.Err() != nil || errors.Is(err, ErrSyslogMessageTooLarge) {
 			return fmt.Errorf("giving up after %d attempt(s): %w", attempt, err)
 		}
 
@@ -198,14 +198,22 @@ func NewRouter(cfg *config.Config) (*Router, error) {
 		if !entry.Enabled {
 			continue
 		}
-		webhook, err := NewWebhook(entry)
+		out, err := newConfiguredOutput(entry)
 		if err != nil {
 			_ = r.Close()
 			return nil, fmt.Errorf("logoutputs[%d] (name %q): %w", i, entry.Name, err)
 		}
-		r.outputs[entry.Name] = newRetrying(webhook, time.Duration(entry.Timeout)*time.Second)
+		r.outputs[entry.Name] = newRetrying(out, time.Duration(entry.Timeout)*time.Second)
 	}
 	return r, nil
+}
+
+// newConfiguredOutput builds the output for a validated entry.
+func newConfiguredOutput(entry *config.LogOutput) (Output, error) {
+	if entry.Type == config.OutputTypeSyslog {
+		return NewSyslog(entry)
+	}
+	return NewWebhook(entry)
 }
 
 // Dispatcher returns a new dispatcher for the source's configured routes.

@@ -79,7 +79,7 @@ webapi:
 
 ### Log Outputs
 
-The top-level `logoutputs` list defines named destinations. `webhook` is the only supported `type`.
+The top-level `logoutputs` list defines named destinations. The supported `type` values are `webhook` and `syslog`.
 
 ```yaml
 logoutputs:
@@ -121,9 +121,34 @@ When `apilogremote` is enabled it is available as an output named `apilogremote`
 - `server_name` overrides the name used for certificate verification.
 - `skip_verify: true` disables verification and cannot be combined with `ca_file`.
 
-The agent logs a startup warning for plaintext `http` webhooks and for `skip_verify: true`.
+The agent logs a startup warning for plaintext `http` webhooks, plaintext `tcp` or `udp` syslog, and `skip_verify: true`.
 
-**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request and retried up to 3 times with exponential backoff within the output's `timeout`. Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged.
+**Syslog.** A `syslog` output sends RFC 5424 messages to a remote server:
+
+```yaml
+logoutputs:
+    - name: "soc-syslog"
+      enabled: true
+      type: "syslog"
+      network: "tls"            # tls, tcp, or udp
+      address: "syslog.example.com:6514"
+      facility: "local0"        # kern ... clock, local0-local7
+      severity: "info"          # emerg, alert, crit, err, warning, notice, info, debug
+      app_name: "webapi-agent"  # Optional, defaults to the source name
+      timeout: 10               # Seconds (1-3600), covering all retries of one record
+      tls:                      # Only allowed with network: tls
+        ca_file: "/etc/webapi/certs/syslog-ca.pem"
+        # cert_file: "/etc/webapi/certs/client.pem"
+        # key_file: "/etc/webapi/certs/client-key.pem"
+        # server_name: "syslog.example.com"  # Defaults to the host in address
+        # skip_verify: false
+```
+
+- `HOSTNAME` is `jarvisagent.name` and `MSG` is the single-line JSON log envelope. Header fields are limited to printable ASCII, with other characters replaced by `_`, and empty values are sent as `-`.
+- `tls` and `tcp` reuse one connection with octet-counted framing (RFC 5425) and reconnect after a failure. A record that was resent after a failed write can arrive twice.
+- `udp` sends one datagram per message. A message over 65,000 bytes is dropped with an error rather than truncated, and operating system limits on datagram size may be lower.
+
+**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request or message and retried up to 3 times with exponential backoff within the output's `timeout`. Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged.
 
 ## Building
 

@@ -143,7 +143,7 @@ func TestValidateOutputs(t *testing.T) {
 		{"blank name when disabled", func(o *LogOutput) { o.Name = ""; o.Enabled = false }, "name is required"},
 		{"reserved name", func(o *LogOutput) { o.Name = "apilogremote" }, "reserved"},
 		{"reserved name when disabled", func(o *LogOutput) { o.Name = "APILogRemote"; o.Enabled = false }, "reserved"},
-		{"unknown type", func(o *LogOutput) { o.Type = "syslog" }, "unknown type"},
+		{"unknown type", func(o *LogOutput) { o.Type = "carrier-pigeon" }, "unknown type"},
 		{"invalid url", func(o *LogOutput) { o.URL = "ftp://user:hunter2@example.com" }, "url must be"},
 		{"url port above range", func(o *LogOutput) { o.URL = "https://user:hunter2@hooks.example.com:99999/a" }, "url port"},
 		{"url port zero", func(o *LogOutput) { o.URL = "https://user:hunter2@hooks.example.com:0/a" }, "url port"},

@@ -15,8 +15,11 @@ import (
 )
 
 const (
-	// OutputTypeWebhook is the only output type currently supported.
+	// OutputTypeWebhook delivers records as HTTP requests.
 	OutputTypeWebhook = "webhook"
+
+	// OutputTypeSyslog delivers records to a remote syslog server.
+	OutputTypeSyslog = "syslog"
 
 	// APILogRemoteOutputName is the reserved name of the output backed by the
 	// legacy apilogremote section.
@@ -99,12 +102,59 @@ type LogOutput struct {
 	Timeout int               `yaml:"timeout"`
 	Headers []OutputHeader    `yaml:"headers"`
 	TLS     tlsconfig.Options `yaml:"tls"`
+
+	// Syslog settings.
+	Network  string `yaml:"network"`
+	Address  string `yaml:"address"`
+	Facility string `yaml:"facility"`
+	Severity string `yaml:"severity"`
+	AppName  string `yaml:"app_name"`
+
+	// tlsSet records that YAML had a tls key, even one holding only zero
+	// values, which the decoded options alone cannot show.
+	tlsSet bool
+}
+
+// UnmarshalYAML keeps track of whether a tls section is present.
+func (o *LogOutput) UnmarshalYAML(node *yaml.Node) error {
+	type plain LogOutput
+	var decoded plain
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	var raw struct {
+		TLS yaml.Node `yaml:"tls"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	*o = LogOutput(decoded)
+	o.tlsSet = raw.TLS.Kind != 0
+	return nil
 }
 
 func (o *LogOutput) validate() error {
-	if o.Type != OutputTypeWebhook {
+	switch o.Type {
+	case OutputTypeWebhook:
+		return o.validateWebhook()
+	case OutputTypeSyslog:
+		return o.validateSyslog()
+	default:
 		return fmt.Errorf("unknown type %q", o.Type)
 	}
+}
+
+func (o *LogOutput) validateTimeout() error {
+	if o.Timeout <= 0 {
+		return fmt.Errorf("timeout must be greater than 0, got %d", o.Timeout)
+	}
+	if o.Timeout > MaxOutputTimeout {
+		return fmt.Errorf("timeout must be at most %d seconds, got %d", MaxOutputTimeout, o.Timeout)
+	}
+	return nil
+}
+
+func (o *LogOutput) validateWebhook() error {
 	if !isHTTPURL(o.URL) {
 		return errors.New("url must be an absolute http or https URL")
 	}
@@ -114,11 +164,8 @@ func (o *LogOutput) validate() error {
 	if !webhookMethods[strings.ToUpper(o.Method)] {
 		return fmt.Errorf("invalid method %q: must be POST, PUT, or PATCH", o.Method)
 	}
-	if o.Timeout <= 0 {
-		return fmt.Errorf("timeout must be greater than 0, got %d", o.Timeout)
-	}
-	if o.Timeout > MaxOutputTimeout {
-		return fmt.Errorf("timeout must be at most %d seconds, got %d", MaxOutputTimeout, o.Timeout)
+	if err := o.validateTimeout(); err != nil {
+		return err
 	}
 	for _, header := range o.Headers {
 		if !isHeaderName(header.Key) {
@@ -229,7 +276,11 @@ func (c *Config) OutputWarnings() []string {
 		if !entry.Enabled {
 			continue
 		}
-		if u, err := url.Parse(entry.URL); err == nil && u.Scheme == "http" {
+		if entry.Type == OutputTypeSyslog {
+			if entry.Network == SyslogNetworkTCP || entry.Network == SyslogNetworkUDP {
+				warnings = append(warnings, fmt.Sprintf("log output %q uses plaintext syslog over %s", entry.Name, entry.Network))
+			}
+		} else if u, err := url.Parse(entry.URL); err == nil && u.Scheme == "http" {
 			warnings = append(warnings, fmt.Sprintf("log output %q uses plaintext http", entry.Name))
 		}
 		if entry.TLS.SkipVerify {

@@ -89,7 +89,7 @@ func (w *Webhook) Send(ctx context.Context, rec Record) error {
 
 	resp, err := w.client.Do(req)
 	if err != nil {
-		return sanitizeTransportError(err)
+		return sanitizeTransportError("webhook", err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
@@ -108,7 +108,7 @@ func (w *Webhook) Close() error {
 
 // sanitizeTransportError maps a client error to a fixed description. The
 // originals can embed the URL, host, or address, so their text is discarded.
-func sanitizeTransportError(err error) error {
+func sanitizeTransportError(label string, err error) error {
 	var (
 		netErr      net.Error
 		dnsErr      *net.DNSError
@@ -121,24 +121,24 @@ func sanitizeTransportError(err error) error {
 	)
 	switch {
 	case errors.Is(err, context.Canceled):
-		return fmt.Errorf("webhook request canceled: %w", context.Canceled)
+		return fmt.Errorf("%s request canceled: %w", label, context.Canceled)
 	case errors.Is(err, context.DeadlineExceeded):
-		return fmt.Errorf("webhook request timed out: %w", context.DeadlineExceeded)
+		return fmt.Errorf("%s request timed out: %w", label, context.DeadlineExceeded)
 	case errors.As(err, &verifyErr), errors.As(err, &unknownErr),
 		errors.As(err, &hostnameErr), errors.As(err, &invalidErr):
-		return errors.New("webhook TLS certificate verification failed")
+		return errors.New(label + " TLS certificate verification failed")
 	case errors.As(err, &recordErr):
-		return errors.New("webhook TLS handshake failed")
+		return errors.New(label + " TLS handshake failed")
 	case errors.As(err, &dnsErr):
-		return errors.New("webhook DNS lookup failed")
+		return errors.New(label + " DNS lookup failed")
 	case errors.As(err, &netErr) && netErr.Timeout():
-		return fmt.Errorf("webhook request timed out: %w", context.DeadlineExceeded)
+		return fmt.Errorf("%s request timed out: %w", label, context.DeadlineExceeded)
 	case errors.As(err, &opErr):
 		if opErr.Op == "remote error" {
-			return errors.New("webhook TLS handshake rejected by server")
+			return errors.New(label + " TLS handshake rejected by server")
 		}
-		return errors.New("webhook connection failed")
+		return errors.New(label + " connection failed")
 	default:
-		return errors.New("webhook request failed")
+		return errors.New(label + " request failed")
 	}
 }

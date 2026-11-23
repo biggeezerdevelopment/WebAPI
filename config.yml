@@ -19,7 +19,7 @@ apilogremote:
     #api_body:
     #    - "metrics"
 
-# Named log outputs. "webhook" is the only type. The name "apilogremote" is
+# Named log outputs of type "webhook" or "syslog". The name "apilogremote" is
 # reserved for the section above.
 #logoutputs:
 #    - name: "siem-webhook"
@@ -38,6 +38,21 @@ apilogremote:
 #        #cert_file: "/etc/webapi/certs/client.pem"    # Mutual TLS, needs key_file
 #        #key_file: "/etc/webapi/certs/client-key.pem"
 #        #server_name: "hooks.internal"
+#        #skip_verify: false           # Cannot be combined with ca_file
+#    - name: "soc-syslog"
+#      enabled: true
+#      type: "syslog"
+#      network: "tls"             # tls, tcp, or udp (tcp and udp are plaintext)
+#      address: "syslog.example.com:6514"
+#      facility: "local0"         # kern ... clock, local0-local7
+#      severity: "info"           # emerg, alert, crit, err, warning, notice, info, debug
+#      app_name: "webapi-agent"   # Optional, defaults to the source name
+#      timeout: 10                # Seconds (1-3600), covering all retries of one record
+#      tls:                       # Only allowed with network: "tls"
+#        ca_file: "/etc/webapi/certs/syslog-ca.pem"
+#        #cert_file: "/etc/webapi/certs/client.pem"    # Mutual TLS, needs key_file
+#        #key_file: "/etc/webapi/certs/client-key.pem"
+#        #server_name: "syslog.example.com"            # Defaults to the address host
 #        #skip_verify: false           # Cannot be combined with ca_file
 #
 # Per-source routing, set on a webapi entry:
