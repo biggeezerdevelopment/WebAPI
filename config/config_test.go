@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -211,13 +210,14 @@ func TestBodyEncoding(t *testing.T) {
 		name      string
 		yaml      string
 		wantEmpty bool
-		wantJSON  string
+		want      string
 	}{
 		{name: "absent", yaml: `name: a`, wantEmpty: true},
 		{name: "empty string", yaml: `body: ""`, wantEmpty: true},
 		{name: "empty list", yaml: `body: []`, wantEmpty: true},
-		{name: "string", yaml: `body: hello`, wantJSON: `"hello"`},
-		{name: "list", yaml: `body: [metrics, cpu]`, wantJSON: `["metrics","cpu"]`},
+		{name: "string", yaml: `body: hello`, want: `hello`},
+		{name: "serialized JSON string", yaml: `body: '{"a":1}'`, want: `{"a":1}`},
+		{name: "list", yaml: `body: [metrics, cpu]`, want: `["metrics","cpu"]`},
 	}
 
 	for _, tt := range tests {
@@ -236,15 +236,18 @@ func TestBodyEncoding(t *testing.T) {
 			if body.IsEmpty() != tt.wantEmpty {
 				t.Fatalf("IsEmpty() = %v, want %v", body.IsEmpty(), tt.wantEmpty)
 			}
-			if tt.wantEmpty {
-				return
-			}
-			got, err := json.Marshal(body)
+			got, err := body.Payload()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(got) != tt.wantJSON {
-				t.Errorf("JSON = %s, want %s", got, tt.wantJSON)
+			if tt.wantEmpty {
+				if got != nil {
+					t.Errorf("Payload() = %q, want nil", got)
+				}
+				return
+			}
+			if string(got) != tt.want {
+				t.Errorf("Payload() = %s, want %s", got, tt.want)
 			}
 		})
 	}

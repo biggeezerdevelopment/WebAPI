@@ -30,7 +30,8 @@ type Header struct {
 }
 
 // Body is a request body configured as a YAML string or list of strings.
-// It is sent as a JSON string or JSON array respectively.
+// A string is already serialized and is sent unchanged; a list is sent as a
+// JSON array.
 type Body struct {
 	value any
 }
@@ -65,9 +66,16 @@ func (b Body) IsEmpty() bool {
 	return b.value == nil
 }
 
-// MarshalJSON encodes the configured string or list.
-func (b Body) MarshalJSON() ([]byte, error) {
-	return json.Marshal(b.value)
+// Payload returns the bytes to send, or nil when no body is configured.
+func (b Body) Payload() ([]byte, error) {
+	switch v := b.value.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		return []byte(v), nil
+	default:
+		return json.Marshal(v)
+	}
 }
 
 type WebAPI struct {

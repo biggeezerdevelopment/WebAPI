@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,19 +36,21 @@ func NewClient(apiConfig *config.WebAPI) *Client {
 }
 
 func (c *Client) SendRequest() ([]byte, error) {
-	var jsonData []byte
-	var err error
-	if !c.config.Body.IsEmpty() {
-		jsonData, err = json.Marshal(c.config.Body)
-		if err != nil {
-			return nil, fmt.Errorf("error marshalling body: %v", err)
-		}
+	payload, err := c.config.Body.Payload()
+	if err != nil {
+		return nil, fmt.Errorf("error encoding body: %v", err)
+	}
+	// The reader stays a nil interface when there is no payload so that the
+	// request carries no body.
+	var body io.Reader
+	if payload != nil {
+		body = bytes.NewReader(payload)
 	}
 
 	req, err := http.NewRequest(
 		strings.ToUpper(c.config.Method),
 		c.config.Endpoint,
-		bytes.NewBuffer(jsonData),
+		body,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("error creating request: %v", err)
