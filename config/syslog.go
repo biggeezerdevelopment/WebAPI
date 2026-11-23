@@ -75,8 +75,8 @@ func (o *LogOutput) validateSyslog() error {
 	return nil
 }
 
-// isHostPort reports whether s is a host, or bracketed IPv6 address, with a
-// port in 1-65535.
+// isHostPort reports whether s is a hostname, IPv4 address, or bracketed IPv6
+// address, with a port in 1-65535.
 func isHostPort(s string) bool {
 	host, portText, err := net.SplitHostPort(s)
 	if err != nil || host == "" {
@@ -85,8 +85,38 @@ func isHostPort(s string) bool {
 	if port, err := strconv.ParseUint(portText, 10, 16); err != nil || port == 0 {
 		return false
 	}
-	if _, err := netip.ParseAddr(host); err == nil {
-		return true
+	addr, addrErr := netip.ParseAddr(host)
+	// SplitHostPort removes brackets from any host, so check for them here.
+	if strings.HasPrefix(s, "[") {
+		return addrErr == nil && addr.Is6()
 	}
-	return len(host) <= 253 && strings.Trim(host, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_") == ""
+	return addrErr == nil || isHostname(host)
+}
+
+// isHostname reports whether host is a DNS name of at most 253 bytes, with an
+// optional root dot. A numeric final label is refused because no top-level
+// domain is numeric, so such a host is a malformed IPv4 address.
+func isHostname(host string) bool {
+	host = strings.TrimSuffix(host, ".")
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	labels := strings.Split(host, ".")
+	for _, label := range labels {
+		if !isHostnameLabel(label) {
+			return false
+		}
+	}
+	return strings.Trim(labels[len(labels)-1], "0123456789") != ""
+}
+
+// isHostnameLabel allows underscores, which service names such as _syslog use,
+// but requires a label to end in a letter or digit and not start with a hyphen.
+func isHostnameLabel(label string) bool {
+	const alphanumeric = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	if label == "" || len(label) > 63 || label[0] == '-' {
+		return false
+	}
+	return strings.Trim(label, alphanumeric+"-_") == "" &&
+		strings.IndexByte(alphanumeric, label[len(label)-1]) >= 0
 }

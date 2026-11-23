@@ -99,11 +99,39 @@ func TestValidateSyslog(t *testing.T) {
 }
 
 func TestValidateSyslogAcceptsAddresses(t *testing.T) {
-	for _, address := range []string{"localhost:514", "10.0.0.1:6514", "[::1]:6514", "[fe80::1%en0]:514", "log_host.example.com:1"} {
+	longestHost := strings.Repeat("a.", 126) + "b"
+	for _, address := range []string{
+		"localhost:514", "10.0.0.1:6514", "[::1]:6514", "[fe80::1%en0]:514", "[::ffff:10.0.0.1]:514",
+		"log_host.example.com:1", "_syslog.example.com:514", "syslog.example.com.:514", "1a.example.com:514",
+		"a-b.example.com:514", strings.Repeat("a", 63) + ".example.com:514",
+		longestHost + ":514", longestHost + ".:514",
+	} {
 		entry := validSyslog()
 		entry.Address = address
 		if err := (&Config{LogOutputs: []LogOutput{entry}}).Validate(); err != nil {
 			t.Errorf("%s: %v", address, err)
+		}
+	}
+}
+
+func TestValidateSyslogRejectsMalformedHosts(t *testing.T) {
+	for _, address := range []string{
+		"...:514", ".:514", "-:514", "_:514", "a..b:514", ".example.com:514", "example.com..:514",
+		"-bad.example.com:514", "bad-.example.com:514", "bad_.example.com:514", "exa mple.com:514",
+		"999.1.1.1:514", "1.2.3:514", "1.2.3.4.5:514", "010.0.0.1:514", "1.1.1.1.:514", "1234:514", "0x7f.0.0.1:514",
+		"[example.com]:514", "[10.0.0.1]:514", "[]:514", "[::1:514",
+		strings.Repeat("a", 64) + ".example.com:514",
+		strings.Repeat("a.", 127) + "b:514",
+	} {
+		entry := validSyslog()
+		entry.Address = address
+		err := (&Config{LogOutputs: []LogOutput{entry}}).Validate()
+		if err == nil {
+			t.Errorf("%q: expected error", address)
+			continue
+		}
+		if !strings.Contains(err.Error(), "address must be") || strings.Contains(err.Error(), address) {
+			t.Errorf("%q: error = %q, want a value-free address error", address, err)
 		}
 	}
 }

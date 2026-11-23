@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -39,6 +40,7 @@ var errSyslogClosed = errors.New("syslog output is closed")
 // Syslog sends records as RFC 5424 messages. Stream transports reuse one
 // connection and use octet-counted framing; UDP sends one datagram per message.
 type Syslog struct {
+	name      string
 	network   string
 	address   string
 	tlsConfig *tls.Config
@@ -84,6 +86,7 @@ func NewSyslog(cfg *config.LogOutput) (*Syslog, error) {
 
 	closeCtx, cancel := context.WithCancel(context.Background())
 	return &Syslog{
+		name:      cfg.Name,
 		network:   cfg.Network,
 		address:   cfg.Address,
 		tlsConfig: tlsCfg,
@@ -194,11 +197,17 @@ func (s *Syslog) dial(ctx context.Context) (net.Conn, error) {
 
 // watch discards anything the server sends and drops the connection when the
 // peer closes it. Without this, the first write after a disconnect would
-// succeed into the socket buffer and its record would be lost silently.
+// succeed into the socket buffer and its record would be lost silently. Read
+// errors are logged because a TLS 1.3 server can reject the client certificate
+// after the client handshake returns, when Send has nothing to report.
 func (s *Syslog) watch(conn net.Conn) {
 	defer s.readers.Done()
-	_, _ = io.Copy(io.Discard, conn)
+	_, err := io.Copy(io.Discard, conn)
 	s.drop(conn)
+	// net.ErrClosed means this side closed the connection on purpose.
+	if err != nil && !errors.Is(err, net.ErrClosed) {
+		log.Printf("Syslog output %q lost its connection: %v", s.name, sanitizeTransportError("syslog", err))
+	}
 }
 
 func (s *Syslog) write(ctx context.Context, conn net.Conn, payload []byte) error {

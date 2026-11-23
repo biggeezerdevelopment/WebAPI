@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -349,6 +350,102 @@ func TestSyslogRejectsUntrustedServer(t *testing.T) {
 	case frame := <-srv.frames:
 		t.Errorf("untrusted server received %q", frame)
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// logCapture collects the standard logger's output for one test.
+type logCapture struct {
+	mu   sync.Mutex
+	text strings.Builder
+}
+
+func (c *logCapture) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.text.Write(p)
+}
+
+func (c *logCapture) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.text.String()
+}
+
+func captureLog(t *testing.T) *logCapture {
+	t.Helper()
+	c := &logCapture{}
+	previous := log.Writer()
+	log.SetOutput(c)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	return c
+}
+
+// TLS 1.3 clients finish the handshake before the server checks their
+// certificate, so this rejection only ever reaches the watcher.
+func TestSyslogLogsPostHandshakeRejection(t *testing.T) {
+	b := testcerts.New(t)
+	logs := captureLog(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		raw, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer raw.Close()
+		_ = raw.SetDeadline(time.Now().Add(syslogTestWait))
+		_ = tls.Server(raw, &tls.Config{
+			Certificates: []tls.Certificate{b.ServerCert},
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+			ClientCAs:    b.CAPool,
+			MinVersion:   tls.VersionTLS13,
+		}).Handshake()
+		// Holding the socket open keeps a reset from racing the alert.
+		<-release
+	}()
+	defer func() {
+		_ = ln.Close()
+		close(release)
+		<-done
+	}()
+
+	address := ln.Addr().String()
+	cfg := syslogConfig("tls", address)
+	cfg.TLS.CAFile = b.CAFile
+	s := newTestSyslog(t, cfg)
+	// Send may succeed or fail depending on when the alert arrives.
+	_ = s.Send(context.Background(), testRecord())
+
+	deadline := time.Now().Add(syslogTestWait)
+	for !strings.Contains(logs.String(), "TLS handshake rejected by server") {
+		if time.Now().After(deadline) {
+			t.Fatalf("rejection was not logged: %q", logs.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := logs.String(); !strings.Contains(got, `"soc"`) || strings.Contains(got, address) {
+		t.Errorf("log = %q, want output name and no address", got)
+	}
+}
+
+func TestSyslogLocalCloseIsNotLogged(t *testing.T) {
+	logs := captureLog(t)
+	srv := startStreamServer(t, nil, false)
+	s := newTestSyslog(t, syslogConfig("tcp", srv.ln.Addr().String()))
+	if err := s.Send(context.Background(), testRecord()); err != nil {
+		t.Fatal(err)
+	}
+	srv.next(t)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := logs.String(); got != "" {
+		t.Errorf("local close logged %q", got)
 	}
 }
 
