@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Options describes a client TLS configuration. Certificates and keys are
@@ -48,7 +49,7 @@ func Build(o Options) (*tls.Config, error) {
 	}
 
 	if o.CertFile != "" {
-		cert, err := tls.LoadX509KeyPair(o.CertFile, o.KeyFile)
+		cert, err := loadKeyPair(o.CertFile, o.KeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("loading client certificate and key: %w", err)
 		}
@@ -58,23 +59,63 @@ func Build(o Options) (*tls.Config, error) {
 	return cfg, nil
 }
 
-// loadCAPool parses every certificate in the bundle. Unlike
-// CertPool.AppendCertsFromPEM it fails on a corrupt entry instead of skipping
-// it, so a damaged bundle cannot silently narrow the trusted set.
-//
-// pem.Decode silently skips anything it cannot decode, including a block with a
-// damaged BEGIN line, so the bundle is walked line by line. Outside a block only
-// blank lines and # comments are allowed, and each decode must consume exactly
-// the block that starts at the current line.
+// loadKeyPair loads a client certificate and key. tls.X509KeyPair parses only
+// the leaf, so the whole cert_file is validated first: a damaged intermediate
+// must fail at startup rather than during a mutual TLS handshake. Each file is
+// read once, so the bytes validated are the bytes used.
+func loadKeyPair(certFile, keyFile string) (tls.Certificate, error) {
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("reading cert_file: %w", err)
+	}
+	if _, err := parseCertificates("cert_file", certFile, certPEM, isKeyMaterial); err != nil {
+		return tls.Certificate{}, err
+	}
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("reading key_file: %w", err)
+	}
+	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+// isKeyMaterial reports whether a PEM block type belongs to a private key, which
+// lets cert_file and key_file name the same combined file.
+func isKeyMaterial(blockType string) bool {
+	return blockType == "PRIVATE KEY" || blockType == "EC PARAMETERS" ||
+		strings.HasSuffix(blockType, " PRIVATE KEY")
+}
+
+// loadCAPool builds a pool from a bundle that must contain only certificates.
+// Unlike CertPool.AppendCertsFromPEM it fails on a corrupt entry instead of
+// skipping it, so a damaged bundle cannot silently narrow the trusted set.
 func loadCAPool(path string) (*x509.CertPool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading ca_file: %w", err)
 	}
-
-	pemBegin := []byte("-----BEGIN ")
+	certs, err := parseCertificates("ca_file", path, data, nil)
+	if err != nil {
+		return nil, err
+	}
 	pool := x509.NewCertPool()
-	count := 0
+	for _, cert := range certs {
+		pool.AddCert(cert)
+	}
+	return pool, nil
+}
+
+// parseCertificates parses every certificate in a PEM file and fails on any
+// corrupt entry. Blocks whose type satisfies skip, if non-nil, are ignored
+// without being parsed. field names the setting in errors, which never include
+// file contents.
+//
+// pem.Decode silently skips anything it cannot decode, including a block with a
+// damaged BEGIN line, so the file is walked line by line. Outside a block only
+// blank lines and # comments are allowed, and each decode must consume exactly
+// the block that starts at the current line.
+func parseCertificates(field, path string, data []byte, skip func(blockType string) bool) ([]*x509.Certificate, error) {
+	pemBegin := []byte("-----BEGIN ")
+	var certs []*x509.Certificate
 	for len(data) > 0 {
 		line, rest, _ := bytes.Cut(data, []byte("\n"))
 		if trimmed := bytes.TrimSpace(line); len(trimmed) == 0 || trimmed[0] == '#' {
@@ -82,29 +123,31 @@ func loadCAPool(path string) (*x509.CertPool, error) {
 			continue
 		}
 		if !bytes.HasPrefix(line, pemBegin) {
-			if count == 0 && !bytes.Contains(data, pemBegin) {
+			if len(certs) == 0 && !bytes.Contains(data, pemBegin) {
 				break // Reported below as a file with no certificates.
 			}
-			return nil, fmt.Errorf("parsing ca_file %q: unexpected data outside a certificate block", path)
+			return nil, fmt.Errorf("parsing %s %q: unexpected data outside a certificate block", field, path)
 		}
 
 		block, next := pem.Decode(data)
 		if block == nil || bytes.Count(data[:len(data)-len(next)], pemBegin) != 1 {
-			return nil, fmt.Errorf("parsing ca_file %q: damaged or truncated PEM block", path)
+			return nil, fmt.Errorf("parsing %s %q: damaged or truncated PEM block", field, path)
 		}
 		data = next
+		if skip != nil && skip(block.Type) {
+			continue
+		}
 		if block.Type != "CERTIFICATE" {
-			return nil, fmt.Errorf("parsing ca_file %q: contains a non-certificate PEM block", path)
+			return nil, fmt.Errorf("parsing %s %q: contains a non-certificate PEM block", field, path)
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
 		if err != nil {
-			return nil, fmt.Errorf("parsing ca_file %q: invalid certificate", path)
+			return nil, fmt.Errorf("parsing %s %q: invalid certificate", field, path)
 		}
-		pool.AddCert(cert)
-		count++
+		certs = append(certs, cert)
 	}
-	if count == 0 {
-		return nil, fmt.Errorf("parsing ca_file %q: no certificates found", path)
+	if len(certs) == 0 {
+		return nil, fmt.Errorf("parsing %s %q: no certificates found", field, path)
 	}
-	return pool, nil
+	return certs, nil
 }

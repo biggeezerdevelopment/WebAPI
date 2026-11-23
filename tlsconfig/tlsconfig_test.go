@@ -55,6 +55,87 @@ func TestBuildAcceptsCommentedBundle(t *testing.T) {
 	}
 }
 
+func TestBuildAcceptsValidCertFileForms(t *testing.T) {
+	b := testcerts.New(t)
+	leaf, err := os.ReadFile(b.ClientCertFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := os.ReadFile(b.CAFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := os.ReadFile(b.ClientKeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+
+	chain := filepath.Join(dir, "chain.pem")
+	if err := os.WriteFile(chain, append(append([]byte{}, leaf...), ca...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Build(Options{CertFile: chain, KeyFile: b.ClientKeyFile})
+	if err != nil {
+		t.Fatalf("valid chain rejected: %v", err)
+	}
+	if got := len(cfg.Certificates[0].Certificate); got != 2 {
+		t.Errorf("chain length = %d, want 2", got)
+	}
+
+	combined := filepath.Join(dir, "combined.pem")
+	if err := os.WriteFile(combined, append(append([]byte{}, leaf...), key...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Build(Options{CertFile: combined, KeyFile: combined}); err != nil {
+		t.Fatalf("combined cert and key file rejected: %v", err)
+	}
+}
+
+func TestBuildRejectsPartlyCorruptCertFile(t *testing.T) {
+	b := testcerts.New(t)
+	leaf, err := os.ReadFile(b.ClientCertFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := os.ReadFile(b.CAFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const secret = "NOT-A-REAL-SECRET-CONTENT"
+	tests := []struct {
+		name, suffix, want string
+	}{
+		{"invalid DER intermediate", "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", "invalid certificate"},
+		{"invalid base64 intermediate", "-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n", "damaged or truncated"},
+		{"truncated intermediate", "-----BEGIN CERTIFICATE-----\nAAAA\n", "damaged or truncated"},
+		{"damaged block before valid one", "-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n" + string(ca), "damaged or truncated"},
+		{"damaged BEGIN line", strings.Replace(string(ca), "-----BEGIN", "----BEGIN", 1), "unexpected data"},
+		{"trailing text", secret + "\n", "unexpected data"},
+		{"unexpected block type", "-----BEGIN TRUSTED CERTIFICATE-----\nAAAA\n-----END TRUSTED CERTIFICATE-----\n", "non-certificate"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "cert.pem")
+			if err := os.WriteFile(path, append(append([]byte{}, leaf...), tt.suffix...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Build(Options{CertFile: path, KeyFile: b.ClientKeyFile})
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			for _, want := range []string{"client certificate", "cert_file", tt.want} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("error leaks file contents: %q", err)
+			}
+		})
+	}
+}
+
 func TestBuildErrors(t *testing.T) {
 	b := testcerts.New(t)
 	dir := t.TempDir()
