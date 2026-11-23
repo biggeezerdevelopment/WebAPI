@@ -43,6 +43,18 @@ func NewLogClient(logConfig *config.APILogRemote) *LogClient {
 	}
 }
 
+// WithoutRedirects returns a client that treats any redirect as a failed send.
+// Go turns a redirected POST into a bodyless GET, so a 2xx from the redirect
+// target would otherwise report an undelivered record as delivered. The
+// transport is shared, and the receiver keeps its behavior.
+func (c *LogClient) WithoutRedirects() *LogClient {
+	httpClient := *c.httpClient
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &LogClient{httpClient: &httpClient, config: c.config}
+}
+
 // normalizeAPIResults stops encoding/json from base64-encoding a raw response
 // body. A nil body stays null, valid JSON is embedded unchanged, and anything
 // else becomes a string. Values that are not []byte pass through untouched.

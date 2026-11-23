@@ -183,15 +183,18 @@ type Router struct {
 	cfg         *config.Config
 	outputs     map[string]Output
 	dispatchers []*Dispatcher
+	// confirmedLogRemote replaces apilogremote in Routes. Its success means the
+	// body reached the configured URL, which checkpointing callers rely on.
+	confirmedLogRemote Output
 }
 
 // NewRouter builds every enabled output from a validated configuration.
 func NewRouter(cfg *config.Config) (*Router, error) {
 	r := &Router{cfg: cfg, outputs: make(map[string]Output)}
 	if cfg.APILogRemote.Enabled {
-		r.outputs[config.APILogRemoteOutputName] = &logRemoteOutput{
-			client: api.NewLogClient(&cfg.APILogRemote),
-		}
+		client := api.NewLogClient(&cfg.APILogRemote)
+		r.outputs[config.APILogRemoteOutputName] = &logRemoteOutput{client: client}
+		r.confirmedLogRemote = &logRemoteOutput{client: client.WithoutRedirects()}
 	}
 	for i := range cfg.LogOutputs {
 		entry := &cfg.LogOutputs[i]
@@ -218,7 +221,7 @@ func newConfiguredOutput(entry *config.LogOutput) (Output, error) {
 
 // Dispatcher returns a new dispatcher for the source's configured routes.
 func (r *Router) Dispatcher(source *config.WebAPI) (*Dispatcher, error) {
-	routes, err := r.Routes(source)
+	routes, err := r.namedOutputs(source)
 	if err != nil {
 		return nil, err
 	}
@@ -237,9 +240,24 @@ type NamedOutput struct {
 	Output Output
 }
 
-// Routes returns the source's outputs for callers that need each delivery's
-// result, which a Dispatcher does not report.
+// Routes returns the source's outputs for callers that act on each delivery's
+// result, which a Dispatcher does not report. A nil error from these outputs
+// must not hide a redirect, so apilogremote refuses redirects here while plain
+// sources keep its legacy behavior through their Dispatcher.
 func (r *Router) Routes(source *config.WebAPI) ([]NamedOutput, error) {
+	routes, err := r.namedOutputs(source)
+	if err != nil {
+		return nil, err
+	}
+	for i := range routes {
+		if routes[i].Name == config.APILogRemoteOutputName {
+			routes[i].Output = r.confirmedLogRemote
+		}
+	}
+	return routes, nil
+}
+
+func (r *Router) namedOutputs(source *config.WebAPI) ([]NamedOutput, error) {
 	names := r.cfg.RoutesFor(source)
 	routes := make([]NamedOutput, 0, len(names))
 	for _, name := range names {

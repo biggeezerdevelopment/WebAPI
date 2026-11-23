@@ -43,6 +43,9 @@ const (
 	fetchGroupSpan = time.Hour
 )
 
+// errNoProgress means a fetch hit maxPagesPastFloor without passing its floor.
+var errNoProgress = errors.New("no progress possible")
+
 // outputRetry tracks consecutive failed delivery attempts for one output.
 type outputRetry struct {
 	failures  int
@@ -169,11 +172,25 @@ func (c *Collector) Poll(ctx context.Context) error {
 	}
 	c.mu.Unlock()
 
+	var stalled error
 	for len(pending) > 0 {
 		floor := nextFloor(pending, failing)
 		events, complete, err := c.fetchWindow(ctx, floor)
+		if errors.Is(err, errNoProgress) {
+			// Only outputs at this floor are stuck. Back them off so the costly
+			// fetch is not repeated every poll, and keep serving the others.
+			// floor is a pending checkpoint, so this always removes an output.
+			stalled = errors.Join(stalled, err)
+			for name, cp := range pending {
+				if cp.TimestampMS == floor {
+					delete(pending, name)
+					c.recordStall(name)
+				}
+			}
+			continue
+		}
 		if err != nil {
-			return err
+			return errors.Join(stalled, err)
 		}
 		// A truncated window always ends after floor, so the output at floor is
 		// always served and the loop terminates.
@@ -196,7 +213,7 @@ func (c *Collector) Poll(ctx context.Context) error {
 			}
 		}
 	}
-	return nil
+	return stalled
 }
 
 // nextFloor picks where the next fetch starts: the oldest checkpoint within
@@ -240,17 +257,35 @@ func (c *Collector) recordOutcome(name string, failed, progressed bool) {
 	if progressed {
 		failures = 1
 	}
-	var wait time.Duration
-	if failures > 1 {
-		wait = time.Duration(c.opts.Source.SleepTime) * time.Second
-		for i := 1; i < failures && wait < maxOutputBackoff; i++ {
-			wait *= 2
-		}
-		if wait > maxOutputBackoff {
-			wait = maxOutputBackoff
-		}
+	c.retries[name] = outputRetry{failures: failures, notBefore: c.now().Add(c.retryWait(failures))}
+}
+
+// recordStall backs off an output whose fetch could not pass its checkpoint.
+// Unlike a delivery failure it waits from the first stall, because each retry
+// can cost up to maxPagesPastFloor requests.
+func (c *Collector) recordStall(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	failures := c.retries[name].failures + 1
+	if failures < 2 {
+		failures = 2
 	}
-	c.retries[name] = outputRetry{failures: failures, notBefore: c.now().Add(wait)}
+	c.retries[name] = outputRetry{failures: failures, notBefore: c.now().Add(c.retryWait(failures))}
+}
+
+// retryWait is zero for a first failure and then doubles up to maxOutputBackoff.
+func (c *Collector) retryWait(failures int) time.Duration {
+	if failures <= 1 {
+		return 0
+	}
+	wait := time.Duration(c.opts.Source.SleepTime) * time.Second
+	for i := 1; i < failures && wait < maxOutputBackoff; i++ {
+		wait *= 2
+	}
+	if wait > maxOutputBackoff {
+		wait = maxOutputBackoff
+	}
+	return wait
 }
 
 // selectEvents returns sorted events after cp. Events stamped later than the
@@ -382,7 +417,7 @@ func (c *Collector) fetchWindow(ctx context.Context, floor int64) ([]event, bool
 			break
 		}
 		if pages >= maxPagesPastFloor {
-			return nil, false, fmt.Errorf("no progress possible: %d pages did not pass the checkpoint, increase per_page", pages)
+			return nil, false, fmt.Errorf("%w: %d pages did not pass the checkpoint, increase per_page", errNoProgress, pages)
 		}
 		if seen[next.String()] {
 			return nil, false, errors.New("pagination loop detected")

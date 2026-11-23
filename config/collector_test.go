@@ -164,14 +164,17 @@ func TestCollectorRejectsCursorOverridesAndEmptyRoutes(t *testing.T) {
 		t.Fatalf("base config invalid: %v", cfg.Validate())
 	}
 	mutations := map[string]func(*Config){
-		"after":       func(c *Config) { c.WebAPI[0].Params = map[string]string{"after": "x"} },
-		"desc":        func(c *Config) { c.WebAPI[0].Params = map[string]string{"order": "desc"} },
-		"created":     func(c *Config) { c.WebAPI[0].Params = map[string]string{"phrase": "created:>2020-01-01"} },
-		"query":       func(c *Config) { c.WebAPI[0].Endpoint += "?phrase=x" },
-		"post":        func(c *Config) { c.WebAPI[0].Method = "post" },
-		"no auth":     func(c *Config) { c.WebAPI[0].AuthType = "" },
-		"no outputs":  func(c *Config) { c.WebAPI[0].Outputs = []string{} },
-		"duplicate":   func(c *Config) { c.WebAPI = append(c.WebAPI, c.WebAPI[0]) },
+		"after":        func(c *Config) { c.WebAPI[0].Params = map[string]string{"after": "x"} },
+		"desc":         func(c *Config) { c.WebAPI[0].Params = map[string]string{"order": "desc"} },
+		"created":      func(c *Config) { c.WebAPI[0].Params = map[string]string{"phrase": "created:>2020-01-01"} },
+		"per_page 0":   func(c *Config) { c.WebAPI[0].Params = map[string]string{"per_page": "0"} },
+		"per_page 101": func(c *Config) { c.WebAPI[0].Params = map[string]string{"per_page": "101"} },
+		"per_page x":   func(c *Config) { c.WebAPI[0].Params = map[string]string{"per_page": "many"} },
+		"query":        func(c *Config) { c.WebAPI[0].Endpoint += "?phrase=x" },
+		"post":         func(c *Config) { c.WebAPI[0].Method = "post" },
+		"no auth":      func(c *Config) { c.WebAPI[0].AuthType = "" },
+		"no outputs":   func(c *Config) { c.WebAPI[0].Outputs = []string{} },
+		"duplicate":    func(c *Config) { c.WebAPI = append(c.WebAPI, c.WebAPI[0]) },
 	}
 	for name, mutate := range mutations {
 		cfg := base()

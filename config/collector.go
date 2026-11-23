@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -121,6 +122,11 @@ func (w *WebAPI) validateCollector(stateDir string) error {
 	}
 	if order, ok := w.Params["order"]; ok && order != "asc" {
 		return errors.New(`collector requires params.order to be "asc" or omitted`)
+	}
+	if perPage, ok := w.Params["per_page"]; ok {
+		if n, err := strconv.Atoi(perPage); err != nil || n < 1 || n > 100 {
+			return errors.New("collector requires params.per_page to be a whole number from 1 to 100")
+		}
 	}
 	if strings.Contains(strings.ToLower(w.Params["phrase"]), "created:") {
 		return errors.New("collector manages the created: qualifier in params.phrase")
