@@ -19,8 +19,34 @@ apilogremote:
     #api_body:
     #    - "metrics"
 
+# Named log outputs. "webhook" is the only type. The name "apilogremote" is
+# reserved for the section above.
+#logoutputs:
+#    - name: "siem-webhook"
+#      enabled: true
+#      type: "webhook"
+#      url: "https://hooks.example.com/audit"
+#      method: "POST"             # POST, PUT, or PATCH
+#      timeout: 10                # Seconds, covering all retries of one record
+#      headers:
+#        - key: "Content-Type"
+#          value: "application/json"
+#        - key: "Authorization"
+#          value_env: "SIEM_WEBHOOK_AUTH"  # Read from the environment
+#      tls:
+#        ca_file: "/etc/webapi/certs/internal-ca.pem"  # Trust only this bundle
+#        #cert_file: "/etc/webapi/certs/client.pem"    # Mutual TLS, needs key_file
+#        #key_file: "/etc/webapi/certs/client-key.pem"
+#        #server_name: "hooks.internal"
+#        #skip_verify: false           # Cannot be combined with ca_file
+#
+# Per-source routing, set on a webapi entry:
+#   omit outputs          sends to all enabled outputs
+#   outputs: []           sends to none
+#   outputs: ["siem-webhook", "apilogremote"]  sends to those named
+
 webapi:
-    - 
+    -
       enabled: False
       name: "qualys"
       subject: "QualysAPI"

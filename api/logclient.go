@@ -60,16 +60,19 @@ func normalizeAPIResults(apiResults interface{}) interface{} {
 	return string(body)
 }
 
-func (c *LogClient) SendLog(agentID, agentName, source string, apiResults interface{}) error {
-	payload := LogPayload{
+// EncodeLogPayload renders the JSON envelope shared by all HTTP log outputs.
+func EncodeLogPayload(agentID, agentName, source string, timestamp int64, apiResults interface{}) ([]byte, error) {
+	return json.Marshal(LogPayload{
 		AgentID:    agentID,
 		AgentName:  agentName,
-		Timestamp:  time.Now().Unix(),
+		Timestamp:  timestamp,
 		Source:     source,
 		APIResults: normalizeAPIResults(apiResults),
-	}
+	})
+}
 
-	jsonData, err := json.Marshal(payload)
+func (c *LogClient) SendLog(agentID, agentName, source string, apiResults interface{}) error {
+	jsonData, err := EncodeLogPayload(agentID, agentName, source, time.Now().Unix(), apiResults)
 	if err != nil {
 		return fmt.Errorf("error marshaling log payload: %v", err)
 	}

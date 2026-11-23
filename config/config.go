@@ -94,6 +94,9 @@ type WebAPI struct {
 	Timeout     int               `yaml:"timeout"`
 	Body        Body              `yaml:"body"`
 	Params      map[string]string `yaml:"params"`
+	// Outputs names this source's destinations. nil (omitted) means all
+	// enabled outputs; an empty list means none.
+	Outputs []string `yaml:"outputs"`
 }
 
 type APILogRemote struct {
@@ -112,6 +115,7 @@ type JarvisAgent struct {
 type Config struct {
 	JarvisAgent  JarvisAgent  `yaml:"jarvisagent"`
 	APILogRemote APILogRemote `yaml:"apilogremote"`
+	LogOutputs   []LogOutput  `yaml:"logoutputs"`
 	WebAPI       []WebAPI     `yaml:"webapi"`
 }
 
@@ -146,6 +150,10 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := c.validateOutputs(); err != nil {
+		return err
+	}
+
 	for i := range c.WebAPI {
 		entry := &c.WebAPI[i]
 		if !entry.Enabled {
@@ -155,7 +163,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("webapi[%d] (name %q): %w", i, entry.Name, err)
 		}
 	}
-	return nil
+	return c.validateRoutes()
 }
 
 func (w *WebAPI) validate() error {
