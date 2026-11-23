@@ -148,7 +148,48 @@ logoutputs:
 - `tls` and `tcp` reuse one connection with octet-counted framing (RFC 5425) and reconnect after a failure. A record that was resent after a failed write can arrive twice.
 - `udp` sends one datagram per message. A message over 65,000 bytes is dropped with an error rather than truncated, and operating system limits on datagram size may be lower.
 
-**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request or message and retried up to 3 times with exponential backoff within the output's `timeout`. Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged.
+**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request or message and retried up to 3 times with exponential backoff within the output's `timeout`. Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged. GitHub audit collectors use the stronger delivery described below.
+
+### GitHub Audit Log Collector
+
+A `webapi` entry with a `collector` polls a GitHub organization audit log and delivers each event as its own record, in `@timestamp` order and at least once. The API requires an organization plan that includes it and a token with audit log access.
+
+```yaml
+state_dir: "./state"
+
+webapi:
+    - enabled: true
+      name: "github-audit"
+      subject: "GitHubAudit"
+      endpoint: "https://api.github.com/orgs/example-org/audit-log"
+      method: "get"
+      auth_type: "apikey"
+      api_key_env: "GITHUB_AUDIT_TOKEN"  # Read from the environment
+      sleeptime: 60
+      timeout: 30
+      headers:
+        - key: "Accept"
+          value: "application/vnd.github+json"
+        - key: "X-GitHub-Api-Version"
+          value: "2022-11-28"
+      params:
+        include: "all"
+        per_page: "100"
+        order: "asc"            # Must be asc or omitted
+      collector:
+        type: "github_audit"
+        initial_lookback_hours: 24  # 1-4320, default 24
+      outputs: ["soc-syslog", "siem-webhook"]
+```
+
+- `api_key_env` works on any `webapi` entry and cannot be combined with `api_key`. The variable must be set and non-empty at startup.
+- A collector requires `method: get`, `auth_type: apikey`, a usable `state_dir`, and at least one output. Its endpoint must have no query string. It manages `after`, `before`, and the `created:` qualifier, so they cannot be configured. Other `phrase` filters are kept.
+- Each output has its own checkpoint: the newest delivered timestamp and the event IDs delivered at that timestamp. An output's batch stops at its first failed record and resumes from its checkpoint on a later poll, so one output being down does not block another or lose its backlog while GitHub retains the events.
+- An output with no checkpoint starts `initial_lookback_hours` back. That start is saved immediately, and adding an output does not change any other output's checkpoint.
+- A failed poll forwards nothing. `Link` pagination, `Retry-After`, and rate-limit headers are honored. Pagination links to another origin and redirects are refused so the token stays with the configured host.
+- State is saved atomically in `state_dir`, one file per source. A corrupt file, or a checkpoint that is negative or in the future, stops startup. Run only one agent per `state_dir`.
+- A record that fails permanently, such as one too large for UDP syslog, holds that output at that record until the cause is fixed. UDP also cannot confirm receipt, so the agent logs a startup warning when a collector routes to it. Use `tls` for at-least-once delivery.
+- An event GitHub publishes with a timestamp older than an output's checkpoint is not delivered to that output.
 
 ## Building
 
@@ -183,6 +224,7 @@ go build -o webapi-agent
 ```
 .
 ├── api/            # API client implementations
+├── collector/      # Checkpointed GitHub audit log collection
 ├── config/         # Configuration handling
 ├── output/         # Named log outputs, routing, and delivery
 ├── tlsconfig/      # Shared client TLS configuration builder

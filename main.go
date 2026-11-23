@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"webapi/api"
+	"webapi/collector"
 	"webapi/config"
 	"webapi/output"
 )
@@ -56,10 +57,43 @@ func main() {
 	ctx := context.Background()
 	var wg sync.WaitGroup
 
+	// Build every collector first, so that bad state stops startup before any
+	// source has begun polling.
+	collectors := make(map[int]*collector.Collector)
+	for i := range cfg.WebAPI {
+		apiCfg := &cfg.WebAPI[i]
+		if !apiCfg.Enabled || apiCfg.Collector == nil {
+			continue
+		}
+		routes, err := router.Routes(apiCfg)
+		if err != nil {
+			log.Fatalf("Failed to route log outputs: %v", err)
+		}
+		c, err := collector.New(collector.Options{
+			Agent:    cfg.JarvisAgent,
+			Source:   apiCfg,
+			StateDir: cfg.StateDir,
+			Fetcher:  api.NewClient(apiCfg),
+			Outputs:  routes,
+		})
+		if err != nil {
+			log.Fatalf("Failed to start collector %q: %v", apiCfg.Name, err)
+		}
+		collectors[i] = c
+	}
+
 	// Initialize API clients for each enabled WebAPI
 	for i := range cfg.WebAPI {
 		apiCfg := &cfg.WebAPI[i]
 		if !apiCfg.Enabled {
+			continue
+		}
+		if c, ok := collectors[i]; ok {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				c.Run(ctx)
+			}()
 			continue
 		}
 

@@ -218,18 +218,38 @@ func newConfiguredOutput(entry *config.LogOutput) (Output, error) {
 
 // Dispatcher returns a new dispatcher for the source's configured routes.
 func (r *Router) Dispatcher(source *config.WebAPI) (*Dispatcher, error) {
+	routes, err := r.Routes(source)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]target, 0, len(routes))
+	for _, route := range routes {
+		targets = append(targets, target{name: route.Name, out: route.Output})
+	}
+	d := newDispatcher(source.Name, targets, laneQueueSize)
+	r.dispatchers = append(r.dispatchers, d)
+	return d, nil
+}
+
+// NamedOutput is an output with the name it is routed by.
+type NamedOutput struct {
+	Name   string
+	Output Output
+}
+
+// Routes returns the source's outputs for callers that need each delivery's
+// result, which a Dispatcher does not report.
+func (r *Router) Routes(source *config.WebAPI) ([]NamedOutput, error) {
 	names := r.cfg.RoutesFor(source)
-	targets := make([]target, 0, len(names))
+	routes := make([]NamedOutput, 0, len(names))
 	for _, name := range names {
 		out, ok := r.outputs[name]
 		if !ok {
 			return nil, fmt.Errorf("webapi (name %q): output %q is not available", source.Name, name)
 		}
-		targets = append(targets, target{name: name, out: out})
+		routes = append(routes, NamedOutput{Name: name, Output: out})
 	}
-	d := newDispatcher(source.Name, targets, laneQueueSize)
-	r.dispatchers = append(r.dispatchers, d)
-	return d, nil
+	return routes, nil
 }
 
 // Close drains all dispatchers and then closes the outputs.

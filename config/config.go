@@ -97,6 +97,14 @@ type WebAPI struct {
 	// Outputs names this source's destinations. nil (omitted) means all
 	// enabled outputs; an empty list means none.
 	Outputs []string `yaml:"outputs"`
+	// APIKeyEnv names an environment variable holding the API key.
+	APIKeyEnv string `yaml:"api_key_env"`
+	// Collector enables checkpointed collection; nil is a plain source.
+	Collector *Collector `yaml:"collector"`
+
+	// These record which keys YAML named, even with empty values.
+	apiKeySet    bool
+	apiKeyEnvSet bool
 }
 
 type APILogRemote struct {
@@ -114,6 +122,7 @@ type JarvisAgent struct {
 
 type Config struct {
 	JarvisAgent  JarvisAgent  `yaml:"jarvisagent"`
+	StateDir     string       `yaml:"state_dir"`
 	APILogRemote APILogRemote `yaml:"apilogremote"`
 	LogOutputs   []LogOutput  `yaml:"logoutputs"`
 	WebAPI       []WebAPI     `yaml:"webapi"`
@@ -159,11 +168,18 @@ func (c *Config) Validate() error {
 		if !entry.Enabled {
 			continue
 		}
-		if err := entry.validate(); err != nil {
+		err := entry.validate()
+		if err == nil && entry.Collector != nil {
+			err = entry.validateCollector(c.StateDir)
+		}
+		if err != nil {
 			return fmt.Errorf("webapi[%d] (name %q): %w", i, entry.Name, err)
 		}
 	}
-	return c.validateRoutes()
+	if err := c.validateRoutes(); err != nil {
+		return err
+	}
+	return c.validateCollectors()
 }
 
 func (w *WebAPI) validate() error {
@@ -181,6 +197,9 @@ func (w *WebAPI) validate() error {
 	}
 	if w.Timeout <= 0 {
 		return fmt.Errorf("timeout must be greater than 0, got %d", w.Timeout)
+	}
+	if _, err := w.ResolveAPIKey(); err != nil {
+		return err
 	}
 	return nil
 }

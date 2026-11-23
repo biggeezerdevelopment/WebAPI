@@ -287,7 +287,7 @@ func (c *Config) OutputWarnings() []string {
 			warnings = append(warnings, fmt.Sprintf("log output %q has TLS verification disabled (skip_verify: true)", entry.Name))
 		}
 	}
-	return warnings
+	return append(warnings, c.collectorWarnings()...)
 }
 
 // hasValidPort reports whether the URL's port, if any, is in 1-65535. It is

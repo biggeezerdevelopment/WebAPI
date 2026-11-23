@@ -2,9 +2,12 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -12,9 +15,14 @@ import (
 	"webapi/config"
 )
 
+// maxPageBytes bounds one paginated response held in memory.
+const maxPageBytes = 64 << 20
+
 type Client struct {
 	httpClient *http.Client
+	pageClient *http.Client
 	config     *config.WebAPI
+	apiKey     string
 }
 
 func NewClient(apiConfig *config.WebAPI) *Client {
@@ -28,10 +36,22 @@ func NewClient(apiConfig *config.WebAPI) *Client {
 		Transport: tr,
 		Timeout:   time.Duration(apiConfig.Timeout) * time.Second,
 	}
+	pageClient := &http.Client{
+		Transport: tr,
+		Timeout:   client.Timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	// A validated config cannot fail here. An unvalidated one sends no key.
+	apiKey, _ := apiConfig.ResolveAPIKey()
 
 	return &Client{
 		httpClient: client,
+		pageClient: pageClient,
 		config:     apiConfig,
+		apiKey:     apiKey,
 	}
 }
 
@@ -70,13 +90,7 @@ func (c *Client) SendRequest() ([]byte, error) {
 		req.URL.RawQuery = q.Encode()
 	}
 
-	// Add authentication if specified
-	if c.config.AuthType == "apikey" && c.config.APIKey != "" {
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.config.APIKey))
-	}
-	if c.config.AuthType == "basic" && c.config.APIUsername != "" && c.config.APIPassword != "" {
-		req.SetBasicAuth(c.config.APIUsername, c.config.APIPassword)
-	}
+	c.authorize(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -89,4 +103,58 @@ func (c *Client) SendRequest() ([]byte, error) {
 	}
 
 	return io.ReadAll(resp.Body)
+}
+
+// authorize adds the configured credentials to req.
+func (c *Client) authorize(req *http.Request) {
+	if c.config.AuthType == "apikey" && c.apiKey != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	}
+	if c.config.AuthType == "basic" && c.config.APIUsername != "" && c.config.APIPassword != "" {
+		req.SetBasicAuth(c.config.APIUsername, c.config.APIPassword)
+	}
+}
+
+// Page is one HTTP response, returned whatever its status so that callers can
+// read pagination and rate-limit headers.
+type Page struct {
+	StatusCode int
+	Header     http.Header
+	Body       []byte
+}
+
+// FetchPage GETs an exact URL with the configured headers and credentials.
+// Redirects are not followed, so the token cannot be forwarded to another
+// host. Returned errors never contain the URL.
+func (c *Client) FetchPage(ctx context.Context, pageURL string) (*Page, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+	if err != nil {
+		return nil, errors.New("error creating page request")
+	}
+	for _, header := range c.config.Headers {
+		req.Header.Set(header.Key, header.Value)
+	}
+	c.authorize(req)
+
+	resp, err := c.pageClient.Do(req)
+	if err != nil {
+		var netErr net.Error
+		switch {
+		case errors.Is(err, context.Canceled):
+			return nil, fmt.Errorf("page request canceled: %w", context.Canceled)
+		case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+			return nil, fmt.Errorf("page request timed out: %w", context.DeadlineExceeded)
+		}
+		return nil, errors.New("page request failed")
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPageBytes+1))
+	if err != nil {
+		return nil, errors.New("error reading page response")
+	}
+	if len(body) > maxPageBytes {
+		return nil, fmt.Errorf("page response exceeds %d bytes", maxPageBytes)
+	}
+	return &Page{StatusCode: resp.StatusCode, Header: resp.Header, Body: body}, nil
 }

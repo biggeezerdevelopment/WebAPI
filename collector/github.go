@@ -1,0 +1,509 @@
+// Package collector polls sources that need a durable cursor and delivers each
+// new event to every routed output, in order and at least once.
+package collector
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"webapi/api"
+	"webapi/config"
+	"webapi/output"
+)
+
+const (
+	// maxPagesPerWindow bounds the events held in memory by one fetch.
+	maxPagesPerWindow = 100
+	// maxRateLimitRetries is the number of waits for one page within a poll.
+	maxRateLimitRetries = 3
+	// maxInlineWait is the longest rate-limit wait spent inside a poll. Longer
+	// waits end the poll and defer the next one.
+	maxInlineWait = 5 * time.Minute
+	// maxRateLimitWait caps a server-supplied delay.
+	maxRateLimitWait = 24 * time.Hour
+	// defaultRateLimitWait applies when a limit response gives no delay.
+	defaultRateLimitWait = time.Minute
+)
+
+// PageFetcher retrieves one URL. api.Client implements it.
+type PageFetcher interface {
+	FetchPage(ctx context.Context, pageURL string) (*api.Page, error)
+}
+
+// Options configures a Collector.
+type Options struct {
+	Agent    config.JarvisAgent
+	Source   *config.WebAPI
+	StateDir string
+	Fetcher  PageFetcher
+	Outputs  []output.NamedOutput
+}
+
+type event struct {
+	id   string
+	ts   int64
+	data []byte
+}
+
+// Collector polls the GitHub audit log for one source.
+type Collector struct {
+	opts      Options
+	statePath string
+	now       func() time.Time
+	sleep     func(context.Context, time.Duration) error
+	notBefore time.Time // used only by the polling goroutine
+
+	mu    sync.Mutex // guards state and busy, and serializes saves
+	state map[string]checkpoint
+	busy  map[string]bool
+	wg    sync.WaitGroup
+}
+
+// New loads the source's state and gives every routed output without a
+// checkpoint one at the initial lookback. Saving it means a restart during an
+// outage cannot move that output's starting point forward.
+func New(opts Options) (*Collector, error) {
+	return newCollector(opts, time.Now)
+}
+
+func newCollector(opts Options, now func() time.Time) (*Collector, error) {
+	path := statePath(opts.StateDir, opts.Source.Name)
+	current := now()
+	state, err := loadState(path, opts.Source.Name, current)
+	if err != nil {
+		return nil, err
+	}
+
+	start := current.Add(-time.Duration(opts.Source.Collector.LookbackHours()) * time.Hour).UnixMilli()
+	added := false
+	for _, out := range opts.Outputs {
+		if _, ok := state[out.Name]; !ok {
+			state[out.Name] = checkpoint{TimestampMS: start}
+			added = true
+		}
+	}
+	if added {
+		if err := saveState(path, opts.Source.Name, state); err != nil {
+			return nil, err
+		}
+	}
+	return &Collector{
+		opts:      opts,
+		statePath: path,
+		now:       now,
+		sleep:     sleepContext,
+		state:     state,
+		busy:      make(map[string]bool),
+	}, nil
+}
+
+// Run polls until ctx is canceled and then waits for deliveries to stop.
+func (c *Collector) Run(ctx context.Context) {
+	defer c.wg.Wait()
+	interval := time.Duration(c.opts.Source.SleepTime) * time.Second
+	for {
+		if err := c.Poll(ctx); err != nil {
+			log.Printf("Error polling collector %q: %v", c.opts.Source.Name, err)
+		}
+		if c.sleep(ctx, interval) != nil {
+			return
+		}
+	}
+}
+
+// Wait blocks until deliveries started by Poll have finished.
+func (c *Collector) Wait() { c.wg.Wait() }
+
+// Poll fetches new events and starts one delivery per idle output. It does not
+// wait for them, so a slow output cannot hold back the others. An output still
+// delivering is skipped and picks up from its checkpoint on a later poll.
+//
+// A fetch is capped, so one lagging output could otherwise keep the window
+// pinned to old events forever. Outputs beyond the window's end are served by
+// another fetch starting from their own checkpoint.
+func (c *Collector) Poll(ctx context.Context) error {
+	if c.now().Before(c.notBefore) {
+		return nil
+	}
+
+	c.mu.Lock()
+	pending := make(map[string]checkpoint)
+	for _, out := range c.opts.Outputs {
+		if !c.busy[out.Name] {
+			pending[out.Name] = c.state[out.Name]
+		}
+	}
+	c.mu.Unlock()
+
+	for len(pending) > 0 {
+		floor := int64(-1)
+		for _, cp := range pending {
+			if floor < 0 || cp.TimestampMS < floor {
+				floor = cp.TimestampMS
+			}
+		}
+
+		events, complete, err := c.fetchWindow(ctx, floor)
+		if err != nil {
+			return err
+		}
+		// The oldest output is always served, so the loop terminates.
+		end := floor
+		if len(events) > 0 && events[len(events)-1].ts > end {
+			end = events[len(events)-1].ts
+		}
+
+		nowMS := c.now().UnixMilli()
+		for _, out := range c.opts.Outputs {
+			cp, ok := pending[out.Name]
+			if !ok || (!complete && cp.TimestampMS > end) {
+				continue
+			}
+			delete(pending, out.Name)
+			if batch := selectEvents(events, cp, nowMS); len(batch) > 0 {
+				c.startDelivery(ctx, out, batch)
+			}
+		}
+	}
+	return nil
+}
+
+// selectEvents returns sorted events after cp. Events stamped later than the
+// local clock wait for a later poll, because a checkpoint must never be in the
+// future.
+func selectEvents(events []event, cp checkpoint, nowMS int64) []event {
+	delivered := make(map[string]bool, len(cp.IDs))
+	for _, id := range cp.IDs {
+		delivered[id] = true
+	}
+	var batch []event
+	for _, ev := range events {
+		if ev.ts > nowMS {
+			break
+		}
+		if ev.ts > cp.TimestampMS || (ev.ts == cp.TimestampMS && !delivered[ev.id]) {
+			batch = append(batch, ev)
+		}
+	}
+	return batch
+}
+
+func (c *Collector) startDelivery(ctx context.Context, out output.NamedOutput, batch []event) {
+	c.mu.Lock()
+	c.busy[out.Name] = true
+	c.mu.Unlock()
+
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		defer func() {
+			c.mu.Lock()
+			delete(c.busy, out.Name)
+			c.mu.Unlock()
+		}()
+		c.deliver(ctx, out, batch)
+	}()
+}
+
+// deliver sends in order and stops at the first failure. Each success is saved
+// before the next send, so a restart repeats at most the record in flight.
+func (c *Collector) deliver(ctx context.Context, out output.NamedOutput, batch []event) {
+	source := c.opts.Source.Name
+	for _, ev := range batch {
+		if ctx.Err() != nil {
+			return
+		}
+		err := out.Output.Send(ctx, output.Record{
+			AgentID:   c.opts.Agent.ID,
+			AgentName: c.opts.Agent.Name,
+			Source:    source,
+			Timestamp: time.UnixMilli(ev.ts),
+			Data:      ev.data,
+		})
+		if err != nil {
+			log.Printf("Error delivering event from collector %q to output %q, will resume from its checkpoint: %v", source, out.Name, err)
+			return
+		}
+		if err := c.advance(out.Name, ev); err != nil {
+			log.Printf("Error saving checkpoint for collector %q output %q: %v", source, out.Name, err)
+			return
+		}
+	}
+}
+
+func (c *Collector) advance(name string, ev event) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cp := c.state[name]
+	if ev.ts > cp.TimestampMS {
+		cp = checkpoint{TimestampMS: ev.ts, IDs: []string{ev.id}}
+	} else {
+		// Copied because Poll may be reading the previous slice's contents.
+		cp.IDs = append(append([]string(nil), cp.IDs...), ev.id)
+	}
+	c.state[name] = cp
+	return saveState(c.statePath, c.opts.Source.Name, c.state)
+}
+
+// fetchWindow reads pages from floor and returns events sorted by timestamp
+// then ID, without duplicates. complete is false when the page cap was reached.
+func (c *Collector) fetchWindow(ctx context.Context, floor int64) ([]event, bool, error) {
+	first, err := c.firstPageURL(floor)
+	if err != nil {
+		return nil, false, err
+	}
+
+	var events []event
+	seen := map[string]bool{first.String(): true}
+	current := first
+	complete := false
+	for pages := 0; pages < maxPagesPerWindow; pages++ {
+		page, err := c.fetchPage(ctx, current.String())
+		if err != nil {
+			return nil, false, err
+		}
+		parsed, err := parseEvents(page.Body)
+		if err != nil {
+			return nil, false, err
+		}
+		events = append(events, parsed...)
+
+		next, err := nextPageURL(current, page.Header)
+		if err != nil {
+			return nil, false, err
+		}
+		if next == nil {
+			complete = true
+			break
+		}
+		if seen[next.String()] {
+			return nil, false, errors.New("pagination loop detected")
+		}
+		seen[next.String()] = true
+		current = next
+	}
+
+	// A partial window is a safe prefix only if the server really sorted it.
+	if !complete {
+		for i := 1; i < len(events); i++ {
+			if events[i].ts < events[i-1].ts {
+				return nil, false, errors.New("events out of order across a truncated fetch")
+			}
+		}
+	}
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].ts != events[j].ts {
+			return events[i].ts < events[j].ts
+		}
+		return events[i].id < events[j].id
+	})
+	unique := events[:0]
+	ids := make(map[string]bool, len(events))
+	for _, ev := range events {
+		if !ids[ev.id] {
+			ids[ev.id] = true
+			unique = append(unique, ev)
+		}
+	}
+	return unique, complete, nil
+}
+
+// firstPageURL builds the query. The created qualifier is rounded down to a
+// whole second so it can only widen the result; exact filtering is local.
+func (c *Collector) firstPageURL(floor int64) (*url.URL, error) {
+	u, err := url.Parse(c.opts.Source.Endpoint)
+	if err != nil {
+		return nil, errors.New("invalid endpoint")
+	}
+	q := url.Values{}
+	for key, value := range c.opts.Source.Params {
+		q.Set(key, value)
+	}
+	created := "created:>=" + time.UnixMilli(floor).UTC().Format("2006-01-02T15:04:05Z")
+	if phrase := strings.TrimSpace(q.Get("phrase")); phrase != "" {
+		created = phrase + " " + created
+	}
+	q.Set("phrase", created)
+	q.Set("order", "asc")
+	u.RawQuery = q.Encode()
+	return u, nil
+}
+
+// fetchPage retrieves one page, honoring rate limits.
+func (c *Collector) fetchPage(ctx context.Context, pageURL string) (*api.Page, error) {
+	for attempt := 0; ; attempt++ {
+		page, err := c.opts.Fetcher.FetchPage(ctx, pageURL)
+		if err != nil {
+			return nil, err
+		}
+		if page.StatusCode >= 200 && page.StatusCode < 300 {
+			return page, nil
+		}
+		wait, limited := rateLimitWait(page, c.now())
+		if !limited {
+			return nil, fmt.Errorf("unexpected status code: %d", page.StatusCode)
+		}
+		if wait > maxInlineWait || attempt >= maxRateLimitRetries {
+			c.notBefore = c.now().Add(wait)
+			return nil, fmt.Errorf("rate limited, next poll in %s", wait)
+		}
+		log.Printf("Collector %q rate limited, retrying in %s", c.opts.Source.Name, wait)
+		if err := c.sleep(ctx, wait); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// rateLimitWait reports whether a response is a rate limit and how long to
+// wait. A 403 without any limit signal is an authorization failure.
+func rateLimitWait(page *api.Page, now time.Time) (time.Duration, bool) {
+	if page.StatusCode != http.StatusTooManyRequests && page.StatusCode != http.StatusForbidden {
+		return 0, false
+	}
+	if wait, ok := parseRetryAfter(page.Header.Get("Retry-After"), now); ok {
+		return clampWait(wait), true
+	}
+	if page.Header.Get("X-RateLimit-Remaining") == "0" {
+		if reset, err := strconv.ParseInt(page.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+			if reset-now.Unix() > int64(maxRateLimitWait/time.Second) {
+				return maxRateLimitWait, true
+			}
+			return clampWait(time.Unix(reset, 0).Sub(now)), true
+		}
+		return defaultRateLimitWait, true
+	}
+	if page.StatusCode == http.StatusTooManyRequests ||
+		strings.Contains(strings.ToLower(string(page.Body)), "rate limit") {
+		return defaultRateLimitWait, true
+	}
+	return 0, false
+}
+
+func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds < 0 {
+			return 0, false
+		}
+		if seconds > int64(maxRateLimitWait/time.Second) {
+			return maxRateLimitWait, true
+		}
+		return time.Duration(seconds) * time.Second, true
+	}
+	if at, err := http.ParseTime(value); err == nil {
+		return at.Sub(now), true
+	}
+	return 0, false
+}
+
+func clampWait(wait time.Duration) time.Duration {
+	if wait < time.Second {
+		return time.Second
+	}
+	if wait > maxRateLimitWait {
+		return maxRateLimitWait
+	}
+	return wait
+}
+
+// parseEvents splits a response array. An event without a usable ID or
+// timestamp fails the poll, because skipping it could lose it for good.
+func parseEvents(body []byte) ([]event, error) {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
+		return nil, errors.New("response is not a JSON array")
+	}
+	events := make([]event, 0, len(raw))
+	for i, item := range raw {
+		var fields struct {
+			Timestamp  *int64  `json:"@timestamp"`
+			DocumentID *string `json:"_document_id"`
+		}
+		if err := json.Unmarshal(item, &fields); err != nil {
+			return nil, fmt.Errorf("event %d is malformed", i)
+		}
+		if fields.DocumentID == nil || *fields.DocumentID == "" {
+			return nil, fmt.Errorf("event %d has no _document_id", i)
+		}
+		if fields.Timestamp == nil || *fields.Timestamp < 0 {
+			return nil, fmt.Errorf("event %d has no valid @timestamp", i)
+		}
+		events = append(events, event{id: *fields.DocumentID, ts: *fields.Timestamp, data: item})
+	}
+	return events, nil
+}
+
+// nextPageURL returns the rel="next" target, or nil on the last page. A link
+// to another origin is refused because the request would carry the token.
+func nextPageURL(current *url.URL, header http.Header) (*url.URL, error) {
+	for _, value := range header.Values("Link") {
+		rest := value
+		for {
+			start := strings.IndexByte(rest, '<')
+			if start < 0 {
+				break
+			}
+			end := strings.IndexByte(rest[start:], '>')
+			if end < 0 {
+				return nil, errors.New("malformed Link header")
+			}
+			target := rest[start+1 : start+end]
+			rest = rest[start+end+1:]
+			params := rest
+			if next := strings.IndexByte(rest, '<'); next >= 0 {
+				params = rest[:next]
+			}
+			if !hasRelNext(params) {
+				continue
+			}
+			parsed, err := current.Parse(target)
+			if err != nil {
+				return nil, errors.New("malformed Link header")
+			}
+			if !strings.EqualFold(parsed.Scheme, current.Scheme) || !strings.EqualFold(parsed.Host, current.Host) {
+				return nil, errors.New("refusing pagination link to a different origin")
+			}
+			return parsed, nil
+		}
+	}
+	return nil, nil
+}
+
+func hasRelNext(params string) bool {
+	for _, param := range strings.FieldsFunc(params, func(r rune) bool { return r == ';' || r == ',' }) {
+		key, value, ok := strings.Cut(strings.TrimSpace(param), "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), "rel") {
+			continue
+		}
+		for _, rel := range strings.Fields(strings.Trim(strings.TrimSpace(value), `"`)) {
+			if strings.EqualFold(rel, "next") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
