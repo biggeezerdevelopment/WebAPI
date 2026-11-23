@@ -145,6 +145,8 @@ func TestValidateOutputs(t *testing.T) {
 		{"reserved name when disabled", func(o *LogOutput) { o.Name = "APILogRemote"; o.Enabled = false }, "reserved"},
 		{"unknown type", func(o *LogOutput) { o.Type = "syslog" }, "unknown type"},
 		{"invalid url", func(o *LogOutput) { o.URL = "ftp://user:hunter2@example.com" }, "url must be"},
+		{"url port above range", func(o *LogOutput) { o.URL = "https://user:hunter2@hooks.example.com:99999/a" }, "url port"},
+		{"url port zero", func(o *LogOutput) { o.URL = "https://user:hunter2@hooks.example.com:0/a" }, "url port"},
 		{"invalid method", func(o *LogOutput) { o.Method = "FETCH" }, "invalid method"},
 		{"bodyless method", func(o *LogOutput) { o.Method = "GET" }, "invalid method"},
 		{"zero timeout", func(o *LogOutput) { o.Timeout = 0 }, "timeout"},
@@ -203,6 +205,67 @@ func TestValidateOutputs(t *testing.T) {
 				if strings.Contains(msg, secret) {
 					t.Errorf("error leaks %q: %s", secret, msg)
 				}
+			}
+		})
+	}
+}
+
+func TestWebhookURLPortBounds(t *testing.T) {
+	for _, raw := range []string{
+		"https://hooks.example.com/a",
+		"https://hooks.example.com:1/a",
+		"https://hooks.example.com:65535/a",
+		"http://[::1]:8080/a",
+	} {
+		entry := validOutput("edge")
+		entry.URL = raw
+		cfg := Config{LogOutputs: []LogOutput{entry}}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("port in %s rejected: %v", raw, err)
+		}
+	}
+}
+
+func TestHeaderValueAndEnvPresence(t *testing.T) {
+	t.Setenv("OUTPUT_TEST_SET", "set-secret-value")
+	load := func(header string) error {
+		_, err := loadYAML(t, `
+logoutputs:
+  - name: "hook"
+    enabled: true
+    type: "webhook"
+    url: "https://hooks.example.com/audit"
+    method: "POST"
+    timeout: 5
+    headers:
+      - `+header+`
+`)
+		return err
+	}
+
+	for name, header := range map[string]string{
+		"empty value with env": `{key: "X-A", value: "", value_env: "OUTPUT_TEST_SET"}`,
+		"null value with env":  `{key: "X-A", value: null, value_env: "OUTPUT_TEST_SET"}`,
+		"value with empty env": `{key: "X-A", value: "inline", value_env: ""}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := load(header)
+			if err == nil || !strings.Contains(err.Error(), "cannot both") {
+				t.Fatalf("got %v", err)
+			}
+			if strings.Contains(err.Error(), "set-secret-value") {
+				t.Errorf("error leaks value: %v", err)
+			}
+		})
+	}
+
+	for name, header := range map[string]string{
+		"value only": `{key: "X-A", value: "inline"}`,
+		"env only":   `{key: "X-A", value_env: "OUTPUT_TEST_SET"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := load(header); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

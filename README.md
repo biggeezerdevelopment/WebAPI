@@ -116,7 +116,7 @@ When `apilogremote` is enabled it is available as an output named `apilogremote`
 
 **TLS.** Connections require TLS 1.2 or later and verify the server by default.
 
-- `ca_file` trusts only that PEM bundle. Without it, the system roots are used. Comments before or between certificates are allowed, but a damaged block, a non-certificate block, or text after the last certificate is a startup error.
+- `ca_file` trusts only that PEM bundle. Without it, the system roots are used. Only blank lines and `#` comments may appear outside certificate blocks. Any other text, a damaged block, or a non-certificate block is a startup error.
 - `cert_file` and `key_file` together provide a client certificate for mutual TLS.
 - `server_name` overrides the name used for certificate verification.
 - `skip_verify: true` disables verification and cannot be combined with `ca_file`.

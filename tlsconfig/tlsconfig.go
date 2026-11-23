@@ -62,25 +62,37 @@ func Build(o Options) (*tls.Config, error) {
 // CertPool.AppendCertsFromPEM it fails on a corrupt entry instead of skipping
 // it, so a damaged bundle cannot silently narrow the trusted set.
 //
-// pem.Decode skips a block it cannot decode and returns nil for a truncated
-// final block, so every BEGIN marker must correspond to a decoded block and
-// only whitespace may follow the last one. Text before or between blocks, such
-// as the comments in distribution bundles, is allowed.
+// pem.Decode silently skips anything it cannot decode, including a block with a
+// damaged BEGIN line, so the bundle is walked line by line. Outside a block only
+// blank lines and # comments are allowed, and each decode must consume exactly
+// the block that starts at the current line.
 func loadCAPool(path string) (*x509.CertPool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading ca_file: %w", err)
 	}
 
-	markers := bytes.Count(data, []byte("-----BEGIN"))
+	pemBegin := []byte("-----BEGIN ")
 	pool := x509.NewCertPool()
 	count := 0
-	for {
-		var block *pem.Block
-		block, data = pem.Decode(data)
-		if block == nil {
-			break
+	for len(data) > 0 {
+		line, rest, _ := bytes.Cut(data, []byte("\n"))
+		if trimmed := bytes.TrimSpace(line); len(trimmed) == 0 || trimmed[0] == '#' {
+			data = rest
+			continue
 		}
+		if !bytes.HasPrefix(line, pemBegin) {
+			if count == 0 && !bytes.Contains(data, pemBegin) {
+				break // Reported below as a file with no certificates.
+			}
+			return nil, fmt.Errorf("parsing ca_file %q: unexpected data outside a certificate block", path)
+		}
+
+		block, next := pem.Decode(data)
+		if block == nil || bytes.Count(data[:len(data)-len(next)], pemBegin) != 1 {
+			return nil, fmt.Errorf("parsing ca_file %q: damaged or truncated PEM block", path)
+		}
+		data = next
 		if block.Type != "CERTIFICATE" {
 			return nil, fmt.Errorf("parsing ca_file %q: contains a non-certificate PEM block", path)
 		}
@@ -93,12 +105,6 @@ func loadCAPool(path string) (*x509.CertPool, error) {
 	}
 	if count == 0 {
 		return nil, fmt.Errorf("parsing ca_file %q: no certificates found", path)
-	}
-	if count != markers {
-		return nil, fmt.Errorf("parsing ca_file %q: damaged or truncated PEM block", path)
-	}
-	if len(bytes.TrimSpace(data)) != 0 {
-		return nil, fmt.Errorf("parsing ca_file %q: unexpected data after last certificate", path)
 	}
 	return pool, nil
 }

@@ -86,6 +86,17 @@ func TestBuildErrors(t *testing.T) {
 	trailing := withSuffix("trailing.pem", secret+"\n")
 	nonCert := withSuffix("non-cert.pem", "-----BEGIN TRUSTED CERTIFICATE-----\nAAAA\n-----END TRUSTED CERTIFICATE-----\n")
 
+	// Each of these damages a certificate between two valid ones.
+	goodPEM := string(good)
+	_, orphanBody, _ := strings.Cut(goodPEM, "\n")
+	damagedBegin := withSuffix("damaged-begin.pem", strings.Replace(goodPEM, "-----BEGIN", "----BEGIN", 1)+goodPEM)
+	orphanedEnd := withSuffix("orphaned-end.pem", orphanBody+goodPEM)
+	onlyEnd := withSuffix("only-end.pem", "-----END CERTIFICATE-----\n"+goodPEM)
+	middleBadBase64 := withSuffix("middle-bad-base64.pem", "-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n"+goodPEM)
+	middleNoEnd := withSuffix("middle-no-end.pem", "-----BEGIN CERTIFICATE-----\nAAAA\n"+goodPEM)
+	middleText := withSuffix("middle-text.pem", "stray text\n"+goodPEM)
+	indentedBegin := withSuffix("indented-begin.pem", " "+goodPEM+goodPEM)
+
 	tests := []struct {
 		name string
 		opts Options
@@ -101,6 +112,13 @@ func TestBuildErrors(t *testing.T) {
 		{"valid cert then truncated block", Options{CAFile: truncated}, "damaged or truncated"},
 		{"valid cert then trailing data", Options{CAFile: trailing}, "unexpected data"},
 		{"valid cert then non-certificate block", Options{CAFile: nonCert}, "non-certificate"},
+		{"middle cert with damaged BEGIN", Options{CAFile: damagedBegin}, "unexpected data"},
+		{"middle cert with missing BEGIN", Options{CAFile: orphanedEnd}, "unexpected data"},
+		{"orphaned END between certs", Options{CAFile: onlyEnd}, "unexpected data"},
+		{"middle cert with invalid base64", Options{CAFile: middleBadBase64}, "damaged or truncated"},
+		{"middle cert with missing END", Options{CAFile: middleNoEnd}, "damaged or truncated"},
+		{"text between certs", Options{CAFile: middleText}, "unexpected data"},
+		{"indented BEGIN", Options{CAFile: indentedBegin}, "unexpected data"},
 		{"unreadable cert", Options{CertFile: missing, KeyFile: b.ClientKeyFile}, "client certificate"},
 		{"unreadable key", Options{CertFile: b.ClientCertFile, KeyFile: missing}, "client certificate"},
 		{"unparsable cert", Options{CertFile: garbage, KeyFile: b.ClientKeyFile}, "client certificate"},

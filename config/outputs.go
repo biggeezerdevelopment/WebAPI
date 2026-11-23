@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"webapi/tlsconfig"
 )
@@ -37,12 +40,40 @@ type OutputHeader struct {
 	Key      string `yaml:"key"`
 	Value    string `yaml:"value"`
 	ValueEnv string `yaml:"value_env"`
+
+	// bothSet records that YAML named both keys, even with an empty value,
+	// which the decoded strings alone cannot show.
+	bothSet bool
+}
+
+// UnmarshalYAML keeps track of which value keys are present.
+func (h *OutputHeader) UnmarshalYAML(node *yaml.Node) error {
+	var raw struct {
+		Key      string    `yaml:"key"`
+		Value    yaml.Node `yaml:"value"`
+		ValueEnv yaml.Node `yaml:"value_env"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	*h = OutputHeader{Key: raw.Key, bothSet: raw.Value.Kind != 0 && raw.ValueEnv.Kind != 0}
+	if raw.Value.Kind != 0 {
+		if err := raw.Value.Decode(&h.Value); err != nil {
+			return fmt.Errorf("header %q: value must be a string", h.Key)
+		}
+	}
+	if raw.ValueEnv.Kind != 0 {
+		if err := raw.ValueEnv.Decode(&h.ValueEnv); err != nil {
+			return fmt.Errorf("header %q: value_env must be a string", h.Key)
+		}
+	}
+	return nil
 }
 
 // Resolve returns the header value. Errors name the header and variable but
 // never the value.
 func (h OutputHeader) Resolve() (string, error) {
-	if h.Value != "" && h.ValueEnv != "" {
+	if h.bothSet || (h.Value != "" && h.ValueEnv != "") {
 		return "", fmt.Errorf("header %q: value and value_env cannot both be set", h.Key)
 	}
 	if h.ValueEnv == "" {
@@ -76,6 +107,9 @@ func (o *LogOutput) validate() error {
 	}
 	if !isHTTPURL(o.URL) {
 		return errors.New("url must be an absolute http or https URL")
+	}
+	if !hasValidPort(o.URL) {
+		return errors.New("url port must be between 1 and 65535")
 	}
 	if !webhookMethods[strings.ToUpper(o.Method)] {
 		return fmt.Errorf("invalid method %q: must be POST, PUT, or PATCH", o.Method)
@@ -203,6 +237,20 @@ func (c *Config) OutputWarnings() []string {
 		}
 	}
 	return warnings
+}
+
+// hasValidPort reports whether the URL's port, if any, is in 1-65535. It is
+// separate from isHTTPURL so that legacy sections keep their existing checks.
+func hasValidPort(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Port() == "" {
+		return true
+	}
+	port, err := strconv.ParseUint(u.Port(), 10, 16)
+	return err == nil && port != 0
 }
 
 // isHeaderName reports whether s is a valid HTTP token.
