@@ -149,6 +149,8 @@ func TestValidateOutputs(t *testing.T) {
 		{"bodyless method", func(o *LogOutput) { o.Method = "GET" }, "invalid method"},
 		{"zero timeout", func(o *LogOutput) { o.Timeout = 0 }, "timeout"},
 		{"negative timeout", func(o *LogOutput) { o.Timeout = -1 }, "timeout"},
+		{"timeout above maximum", func(o *LogOutput) { o.Timeout = MaxOutputTimeout + 1 }, "at most"},
+		{"timeout that overflows duration", func(o *LogOutput) { o.Timeout = int(^uint(0) >> 1) }, "at most"},
 		{"cert without key", func(o *LogOutput) { o.TLS.CertFile = b.ClientCertFile }, "key_file"},
 		{"key without cert", func(o *LogOutput) { o.TLS.KeyFile = b.ClientKeyFile }, "cert_file"},
 		{"unreadable CA", func(o *LogOutput) { o.TLS.CAFile = garbage + ".missing" }, "ca_file"},

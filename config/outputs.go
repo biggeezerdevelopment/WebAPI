@@ -18,6 +18,10 @@ const (
 	// APILogRemoteOutputName is the reserved name of the output backed by the
 	// legacy apilogremote section.
 	APILogRemoteOutputName = "apilogremote"
+
+	// MaxOutputTimeout is the largest accepted output timeout in seconds. It
+	// keeps the conversion to time.Duration from overflowing.
+	MaxOutputTimeout = 3600
 )
 
 // webhookMethods lists the methods that can carry the JSON record body.
@@ -78,6 +82,9 @@ func (o *LogOutput) validate() error {
 	}
 	if o.Timeout <= 0 {
 		return fmt.Errorf("timeout must be greater than 0, got %d", o.Timeout)
+	}
+	if o.Timeout > MaxOutputTimeout {
+		return fmt.Errorf("timeout must be at most %d seconds, got %d", MaxOutputTimeout, o.Timeout)
 	}
 	for _, header := range o.Headers {
 		if !isHeaderName(header.Key) {

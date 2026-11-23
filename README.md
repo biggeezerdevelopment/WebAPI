@@ -74,7 +74,56 @@ webapi:
         metrics: "20"          # Query parameters
       body:
         - "metrics"            # Request body parameters
+      outputs: ["siem-webhook"] # Optional routing, see Log Outputs
 ```
+
+### Log Outputs
+
+The top-level `logoutputs` list defines named destinations. `webhook` is the only supported `type`.
+
+```yaml
+logoutputs:
+    - name: "siem-webhook"
+      enabled: true
+      type: "webhook"
+      url: "https://hooks.example.com/audit"
+      method: "POST"            # POST, PUT, or PATCH
+      timeout: 10               # Seconds (1-3600), covering all retries of one record
+      headers:
+        - key: "Content-Type"
+          value: "application/json"
+        - key: "Authorization"
+          value_env: "SIEM_WEBHOOK_AUTH"  # Read from the environment
+      tls:
+        ca_file: "/etc/webapi/certs/internal-ca.pem"
+        # cert_file: "/etc/webapi/certs/client.pem"
+        # key_file: "/etc/webapi/certs/client-key.pem"
+        # server_name: "hooks.internal"
+        # skip_verify: false
+```
+
+**Routing.** Each `webapi` entry selects its destinations with `outputs`:
+
+| Setting | Records go to |
+|---|---|
+| `outputs` omitted | All enabled outputs |
+| `outputs: []` | No outputs |
+| `outputs: ["siem-webhook", "apilogremote"]` | The named outputs |
+
+When `apilogremote` is enabled it is available as an output named `apilogremote`, and that name cannot be used in `logoutputs`. Routing to an unknown or disabled output is a startup error.
+
+**Headers.** Each header sets exactly one of `value` or `value_env`. A variable named by `value_env` must be set and non-empty at startup. Prefer `value_env` for credentials so they stay out of the config file.
+
+**TLS.** Connections require TLS 1.2 or later and verify the server by default.
+
+- `ca_file` trusts only that PEM bundle. Without it, the system roots are used. Comments before or between certificates are allowed, but a damaged block, a non-certificate block, or text after the last certificate is a startup error.
+- `cert_file` and `key_file` together provide a client certificate for mutual TLS.
+- `server_name` overrides the name used for certificate verification.
+- `skip_verify: true` disables verification and cannot be combined with `ca_file`.
+
+The agent logs a startup warning for plaintext `http` webhooks and for `skip_verify: true`.
+
+**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request and retried up to 3 times with exponential backoff within the output's `timeout`. Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged.
 
 ## Building
 
@@ -110,6 +159,8 @@ go build -o webapi-agent
 .
 ├── api/            # API client implementations
 ├── config/         # Configuration handling
+├── output/         # Named log outputs, routing, and delivery
+├── tlsconfig/      # Shared client TLS configuration builder
 ├── main.go         # Main application entry point
 ├── config.yml      # Configuration file
 ├── go.mod          # Go module definition

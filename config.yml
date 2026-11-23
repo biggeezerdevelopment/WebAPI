@@ -27,7 +27,7 @@ apilogremote:
 #      type: "webhook"
 #      url: "https://hooks.example.com/audit"
 #      method: "POST"             # POST, PUT, or PATCH
-#      timeout: 10                # Seconds, covering all retries of one record
+#      timeout: 10                # Seconds (1-3600), covering all retries of one record
 #      headers:
 #        - key: "Content-Type"
 #          value: "application/json"

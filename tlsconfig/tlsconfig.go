@@ -3,6 +3,7 @@
 package tlsconfig
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -60,12 +61,18 @@ func Build(o Options) (*tls.Config, error) {
 // loadCAPool parses every certificate in the bundle. Unlike
 // CertPool.AppendCertsFromPEM it fails on a corrupt entry instead of skipping
 // it, so a damaged bundle cannot silently narrow the trusted set.
+//
+// pem.Decode skips a block it cannot decode and returns nil for a truncated
+// final block, so every BEGIN marker must correspond to a decoded block and
+// only whitespace may follow the last one. Text before or between blocks, such
+// as the comments in distribution bundles, is allowed.
 func loadCAPool(path string) (*x509.CertPool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading ca_file: %w", err)
 	}
 
+	markers := bytes.Count(data, []byte("-----BEGIN"))
 	pool := x509.NewCertPool()
 	count := 0
 	for {
@@ -75,7 +82,7 @@ func loadCAPool(path string) (*x509.CertPool, error) {
 			break
 		}
 		if block.Type != "CERTIFICATE" {
-			continue
+			return nil, fmt.Errorf("parsing ca_file %q: contains a non-certificate PEM block", path)
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
 		if err != nil {
@@ -86,6 +93,12 @@ func loadCAPool(path string) (*x509.CertPool, error) {
 	}
 	if count == 0 {
 		return nil, fmt.Errorf("parsing ca_file %q: no certificates found", path)
+	}
+	if count != markers {
+		return nil, fmt.Errorf("parsing ca_file %q: damaged or truncated PEM block", path)
+	}
+	if len(bytes.TrimSpace(data)) != 0 {
+		return nil, fmt.Errorf("parsing ca_file %q: unexpected data after last certificate", path)
 	}
 	return pool, nil
 }
