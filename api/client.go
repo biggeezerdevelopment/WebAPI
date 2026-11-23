@@ -39,7 +39,7 @@ func NewClient(apiConfig *config.WebAPI) *Client {
 func (c *Client) SendRequest() ([]byte, error) {
 	var jsonData []byte
 	var err error
-	if c.config.Body != "" {
+	if !c.config.Body.IsEmpty() {
 		jsonData, err = json.Marshal(c.config.Body)
 		if err != nil {
 			return nil, fmt.Errorf("error marshalling body: %v", err)
