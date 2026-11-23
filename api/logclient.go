@@ -42,13 +42,30 @@ func NewLogClient(logConfig *config.APILogRemote) *LogClient {
 	}
 }
 
+// normalizeAPIResults stops encoding/json from base64-encoding a raw response
+// body. A nil body stays null, valid JSON is embedded unchanged, and anything
+// else becomes a string. Values that are not []byte pass through untouched.
+func normalizeAPIResults(apiResults interface{}) interface{} {
+	body, ok := apiResults.([]byte)
+	if !ok {
+		return apiResults
+	}
+	if body == nil {
+		return nil
+	}
+	if json.Valid(body) {
+		return json.RawMessage(body)
+	}
+	return string(body)
+}
+
 func (c *LogClient) SendLog(agentID, agentName, source string, apiResults interface{}) error {
 	payload := LogPayload{
 		AgentID:    agentID,
 		AgentName:  agentName,
 		Timestamp:  time.Now().Unix(),
 		Source:     source,
-		APIResults: apiResults,
+		APIResults: normalizeAPIResults(apiResults),
 	}
 
 	jsonData, err := json.Marshal(payload)
