@@ -107,6 +107,9 @@ webapi:
       api_key: "1234567890"
       #api_username: "admin"
       #api_password: "password"
+      # Or read the basic-auth password (e.g. an API token) from the
+      # environment instead of committing it; do not set both:
+      #api_password_env: "JIRA_API_TOKEN"
       skip_verify: True
       sleeptime: 30
       timeout: 30

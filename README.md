@@ -183,7 +183,19 @@ webapi:
 ```
 
 - `api_key_env` works on any `webapi` entry and cannot be combined with `api_key`. The variable must be set and non-empty at startup.
-- A collector requires `method: get`, `auth_type: apikey`, a usable `state_dir`, and at least one output. Its endpoint must have no query string. It manages `after`, `before`, and the `created:` qualifier, so they cannot be configured. Other `phrase` filters are kept.
+- `api_password_env` does the same for the basic-auth password (for example an API token) and cannot be combined with `api_password`. With `auth_type: basic`, startup fails unless `api_username` is set and a password resolves. Errors name the variable but never its value:
+
+  ```yaml
+  - enabled: true
+    name: "example"
+    endpoint: "https://example.atlassian.net/rest/api/3/myself"
+    method: "get"
+    auth_type: "basic"
+    api_username: "svc-audit@example.com"
+    api_password_env: "JIRA_API_TOKEN"
+  ```
+
+- Each collector type sets the auth it needs. `github_audit` requires `method: get`, `auth_type: apikey`, a usable `state_dir`, and at least one output. Its endpoint must have no query string. It manages `after`, `before`, and the `created:` qualifier, so they cannot be configured. Other `phrase` filters are kept.
 - Each output has its own checkpoint: the newest delivered timestamp and the event IDs delivered at that timestamp. An output's batch stops at its first failed record and resumes from its checkpoint on a later poll, so one output being down does not block another or lose its backlog while GitHub retains the events.
 - Caught-up outputs are fetched first. An output that keeps failing is retried with a doubling delay of up to one hour, so its backlog fetches do not use up the GitHub rate limit. The delay resets when the output makes progress or the agent restarts.
 - An output with no checkpoint starts `initial_lookback_hours` back. That start is saved immediately, and adding an output does not change any other output's checkpoint.

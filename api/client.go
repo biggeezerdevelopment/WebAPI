@@ -23,6 +23,7 @@ type Client struct {
 	pageClient *http.Client
 	config     *config.WebAPI
 	apiKey     string
+	password   string
 }
 
 func NewClient(apiConfig *config.WebAPI) *Client {
@@ -44,14 +45,17 @@ func NewClient(apiConfig *config.WebAPI) *Client {
 		},
 	}
 
-	// A validated config cannot fail here. An unvalidated one sends no key.
+	// Credentials resolve once, here. A validated config cannot fail; an
+	// unvalidated one sends no credential.
 	apiKey, _ := apiConfig.ResolveAPIKey()
+	password, _ := apiConfig.ResolveAPIPassword()
 
 	return &Client{
 		httpClient: client,
 		pageClient: pageClient,
 		config:     apiConfig,
 		apiKey:     apiKey,
+		password:   password,
 	}
 }
 
@@ -110,8 +114,8 @@ func (c *Client) authorize(req *http.Request) {
 	if c.config.AuthType == "apikey" && c.apiKey != "" {
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
 	}
-	if c.config.AuthType == "basic" && c.config.APIUsername != "" && c.config.APIPassword != "" {
-		req.SetBasicAuth(c.config.APIUsername, c.config.APIPassword)
+	if c.config.AuthType == "basic" && c.config.APIUsername != "" && c.password != "" {
+		req.SetBasicAuth(c.config.APIUsername, c.password)
 	}
 }
 
