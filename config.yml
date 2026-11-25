@@ -91,6 +91,26 @@ apilogremote:
 #        initial_lookback_hours: 24  # 1-4320, used for outputs with no checkpoint
 #      outputs: ["soc-syslog", "siem-webhook"]
 
+# Atlassian organization audit log source (events-stream API), added under
+# webapi. The organization API key needs the read:events:admin scope and is
+# sent as a bearer token. Only auth_type "apikey" is accepted. from, to,
+# cursor and sortOrder are managed by the collector and must not be set.
+#    - enabled: true
+#      name: "atlassian-org-audit"
+#      subject: "AtlassianOrgAudit"
+#      endpoint: "https://api.atlassian.com/admin/v1/orgs/<org-id>/events-stream"
+#      method: "get"
+#      auth_type: "apikey"
+#      api_key_env: "ATLASSIAN_ORG_API_KEY"
+#      sleeptime: 60
+#      timeout: 30
+#      params:
+#        limit: "500"             # Optional, 1-500, default 500
+#      collector:
+#        type: "atlassian_org_audit"
+#        initial_lookback_hours: 24  # 1-4320, used for outputs with no checkpoint
+#      outputs: ["siem-webhook"]
+
 webapi:
     -
       enabled: False

@@ -15,6 +15,9 @@ import (
 const (
 	// CollectorTypeGitHubAudit polls a GitHub organization audit log.
 	CollectorTypeGitHubAudit = "github_audit"
+	// CollectorTypeAtlassianOrgAudit polls an Atlassian organization's audit
+	// log through the events-stream API.
+	CollectorTypeAtlassianOrgAudit = "atlassian_org_audit"
 
 	// AuthTypeAPIKey sends api_key as a bearer token.
 	AuthTypeAPIKey = "apikey"
@@ -120,7 +123,8 @@ type collectorRules struct {
 
 // collectorValidators selects the per-type rules by collector.type.
 var collectorValidators = map[string]collectorRules{
-	CollectorTypeGitHubAudit: {authType: AuthTypeAPIKey, params: validateGitHubAuditParams},
+	CollectorTypeGitHubAudit:       {authType: AuthTypeAPIKey, params: validateGitHubAuditParams},
+	CollectorTypeAtlassianOrgAudit: {authType: AuthTypeAPIKey, params: validateAtlassianOrgAuditParams},
 }
 
 // CheckAuth reports whether the entry is configured for authType with a
@@ -197,6 +201,22 @@ func validateGitHubAuditParams(w *WebAPI) error {
 	}
 	if strings.Contains(strings.ToLower(w.Params["phrase"]), "created:") {
 		return errors.New("collector manages the created: qualifier in params.phrase")
+	}
+	return nil
+}
+
+// validateAtlassianOrgAuditParams leaves the window, cursor and ordering to
+// the collector and bounds the page size.
+func validateAtlassianOrgAuditParams(w *WebAPI) error {
+	for _, name := range []string{"from", "to", "cursor", "sortOrder"} {
+		if _, ok := w.Params[name]; ok {
+			return fmt.Errorf("collector manages the %q parameter", name)
+		}
+	}
+	if limit, ok := w.Params["limit"]; ok {
+		if n, err := strconv.Atoi(limit); err != nil || n < 1 || n > 500 {
+			return errors.New("collector requires params.limit to be a whole number from 1 to 500")
+		}
 	}
 	return nil
 }

@@ -207,6 +207,35 @@ webapi:
 - Syslog has no application-level acknowledgement, so the agent logs a startup warning when a collector routes to it on any transport. Over `tls` or `tcp`, a write succeeds once it reaches the local socket buffer, so events written during a silent peer hang or network partition can be lost even though their checkpoint advances. A closed connection is detected and retried. UDP confirms nothing. Use a webhook output where at-least-once delivery is required.
 - An event GitHub publishes with a timestamp older than an output's checkpoint is not delivered to that output, because delivering it would break timestamp order.
 
+### Atlassian Organization Audit Log Collector
+
+The `atlassian_org_audit` collector polls an Atlassian organization's audit log through the events-stream API (`GET https://api.atlassian.com/admin/v1/orgs/{orgId}/events-stream`) and sends each event, unchanged, to the routed outputs. It uses the same engine as `github_audit`, so the checkpoint, retry, backoff and fan-out rules above apply to it as well.
+
+```yaml
+webapi:
+  - enabled: true
+    name: "atlassian-org-audit"
+    subject: "AtlassianOrgAudit"
+    endpoint: "https://api.atlassian.com/admin/v1/orgs/<org-id>/events-stream"
+    method: "get"
+    auth_type: "apikey"
+    api_key_env: "ATLASSIAN_ORG_API_KEY"
+    sleeptime: 60
+    timeout: 30
+    params:
+      limit: "500"              # optional, 1-500, default 500
+    collector:
+      type: "atlassian_org_audit"
+      initial_lookback_hours: 24
+    outputs: ["siem-webhook"]
+```
+
+- Create an organization API key with the `read:events:admin` scope. The key is sent as `Authorization: Bearer <key>`. Only `auth_type: apikey` is accepted.
+- The collector manages `from`, `to`, `cursor` and `sortOrder`, so they cannot be set in `params`. `limit` must be a whole number from 1 to 500.
+- Events are keyed by `data[].id` and ordered by `attributes.processedAt`. An event with no `id`, or a missing or invalid `processedAt`, fails the poll, as does a page whose `processedAt` values decrease.
+- The first request of a window asks for `from` one hour before the checkpoint, with `sortOrder=asc`. Atlassian does not document which timestamp `from` filters on, and an event's time can be earlier than its processing time. The overlap covers that, and the checkpoint filters out events that were already delivered.
+- Pages are followed with `cursor` set to `meta.next`. The API may return `meta.next` on the last page so that clients can poll for new events, so the window also ends when a page holds fewer than `limit` events.
+
 ## Building
 
 To build the project:

@@ -35,6 +35,8 @@ func sourceFor(w *config.WebAPI) (Source, error) {
 	switch w.Collector.Type {
 	case config.CollectorTypeGitHubAudit:
 		return &githubSource{source: w}, nil
+	case config.CollectorTypeAtlassianOrgAudit:
+		return &atlassianSource{source: w}, nil
 	default:
 		return nil, fmt.Errorf("unknown collector.type %q", w.Collector.Type)
 	}
