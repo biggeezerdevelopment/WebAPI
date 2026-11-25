@@ -148,7 +148,7 @@ logoutputs:
 - `tls` and `tcp` reuse one connection with octet-counted framing (RFC 5425) and reconnect after a failure. A record that was resent after a failed write can arrive twice.
 - `udp` sends one datagram per message. A message over 65,000 bytes is dropped with an error rather than truncated, and operating system limits on datagram size may be lower.
 
-**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request or message and retried up to 3 times with exponential backoff within the output's `timeout`. Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged. GitHub audit collectors use the stronger delivery described below.
+**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request or message and retried up to 3 times with exponential backoff within the output's `timeout`. Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged. Collector sources (`github_audit`, `atlassian_org_audit`, `jira_audit`, `stripe_activity_logs`) use the stronger delivery described below.
 
 ### GitHub Audit Log Collector
 
@@ -200,7 +200,7 @@ webapi:
 - Caught-up outputs are fetched first. An output that keeps failing is retried with a doubling delay of up to one hour, so its backlog fetches do not use up the GitHub rate limit. The delay resets when the output makes progress or the agent restarts.
 - An output with no checkpoint starts `initial_lookback_hours` back. That start is saved immediately, and adding an output does not change any other output's checkpoint.
 - A failed poll forwards nothing. `Link` pagination, `Retry-After` (on rate-limit and 5xx responses), and rate-limit headers are honored. Pagination links to another origin and redirects are refused so the token stays with the configured host.
-- A fetch normally stops at 100 pages, but keeps paging until it passes the checkpoint's timestamp so a very busy second cannot stall an output. If 10,000 pages do not pass it, the poll logs a "no progress" error, delivers nothing to the outputs at that checkpoint, retries them with a doubling delay, and still serves other outputs. `per_page` must be 1 to 100. Keep it at `100` to avoid this and to limit rate-limit use.
+- A fetch reads at most 100 pages, counted from the page that passes the checkpoint's timestamp. Pages before that do not count, so a very busy second, or a source that must start below the checkpoint, cannot stall an output. If 10,000 pages do not pass it, the poll logs a "no progress" error, delivers nothing to the outputs at that checkpoint, retries them with a doubling delay, and still serves other outputs. `per_page` must be 1 to 100. Keep it at `100` to avoid this and to limit rate-limit use.
 - State is saved atomically in `state_dir`, one file per source. A corrupt file, or a checkpoint that is negative or in the future, stops startup. Run only one agent per `state_dir`.
 - Collector delivery to `apilogremote` treats any redirect as a failed send, because a followed redirect can drop the request body. Plain sources keep following redirects on that output.
 - A record that fails permanently, such as one too large for UDP syslog, holds that output at that record until the cause is fixed.
@@ -267,6 +267,47 @@ webapi:
 - Atlassian does not document the sort order. The collector expects newest first and fails the poll if a page, or the boundary between two pages, is in another order. It also fails the poll if `total` changes during the window or a page holds the wrong number of records. The engine retries on the next cycle.
 - Records are keyed by `records[].id` (an integer) and ordered by `created`, which may use a `+0000`-style offset or RFC 3339. A record with a missing or invalid `id` or `created` fails the poll.
 
+### Stripe Activity Logs Collector
+
+The `stripe_activity_logs` collector polls a Stripe account's security history through the Activity Logs API (`GET https://api.stripe.com/v2/iam/activity_logs`) and sends each record, unchanged, to the routed outputs. It uses the same engine as `github_audit`. The API is a preview and can change without notice.
+
+```yaml
+webapi:
+  - enabled: true
+    name: "stripe-activity-logs"
+    subject: "StripeActivityLogs"
+    endpoint: "https://api.stripe.com/v2/iam/activity_logs"
+    method: "get"
+    auth_type: "apikey"
+    api_key_env: "STRIPE_ACTIVITY_LOGS_KEY"
+    sleeptime: 300
+    timeout: 30
+    headers:
+      - key: "Stripe-Version"
+        value: "2026-11-18.preview"
+    params:
+      limit: "100"              # optional, 1-100, default 100
+      #"action_groups[0]": "api_key"
+    collector:
+      type: "stripe_activity_logs"
+      initial_lookback_hours: 24
+      settle_minutes: 30        # optional, 10-1440, default 30
+    outputs: ["siem-webhook"]
+```
+
+- Create a restricted key with the **Activity logs: Read** permission. It is sent as `Authorization: Bearer <key>`. Only `auth_type: apikey` is accepted.
+- A `Stripe-Version` header is required. Use `2026-11-18.preview`. Without the header Stripe returns 400, and a non-preview version returns 404.
+- The collector manages `page`, so it cannot be set in `params`. `limit` must be a whole number from 1 to 100.
+- `actions`, `action_groups` and `logs_from` are passed through. Set a filter bare with one value (`actions: "api_key_created"`), or with indexes for several values (`actions[0]`, `actions[1]`). Indexes must start at 0 with no gaps. A filter cannot be both bare and indexed. Stripe rejects `actions[]`, so the collector refuses it at startup. Other parameters are refused at startup.
+- A filter value Stripe does not recognize makes every poll fail with status 400. Test new filters with a single request first.
+- The API has no time filter, so each poll walks the list from the oldest retained record. Stripe keeps records for 6 months. A poll costs about `ceil(N / limit) + 1` requests for `N` matching records. Use `sleeptime: 300` or more, and on a large account narrow the walk with `action_groups`.
+- The list is in record-ID order, and `created` can step back by about a second between records. Each record's checkpoint time is therefore the highest `created` seen so far in the walk. The record is still delivered unchanged. A late record listed after everything already delivered is still delivered.
+- Records created within the last `settle_minutes` are held back until a later poll. Stripe says records take at least 10 minutes to appear and gives no upper bound. The hold-back reduces, but does not remove, the risk of missing a record that Stripe inserts behind an output's checkpoint. `settle_minutes` is accepted only by this collector type.
+- Changing the filters changes the running maximum, so records can be re-sent.
+- A record with no `id`, or a missing or invalid RFC 3339 `created`, fails the poll.
+- `next_page_url` is a path relative to the API host. The collector resolves it against the current page. Links to another host are refused. A walk ends on a page shorter than `limit`, because Stripe returns `next_page_url` even on the last page.
+- Records contain personal data, including email addresses, IP addresses, locations and user agents. Route them only to outputs that are approved for that data.
+
 ## Building
 
 To build the project:
@@ -300,7 +341,7 @@ go build -o webapi-agent
 ```
 .
 ├── api/            # API client implementations
-├── collector/      # Checkpointed GitHub audit log collection
+├── collector/      # Checkpointed audit log collectors (GitHub, Atlassian, Jira, Stripe)
 ├── config/         # Configuration handling
 ├── output/         # Named log outputs, routing, and delivery
 ├── tlsconfig/      # Shared client TLS configuration builder
