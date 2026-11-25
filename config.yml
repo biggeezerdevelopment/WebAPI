@@ -133,6 +133,34 @@ apilogremote:
 #        initial_lookback_hours: 24  # 1-4320, used for outputs with no checkpoint
 #      outputs: ["siem-webhook"]
 
+# Stripe Activity Logs source (preview API), added under webapi. The restricted
+# key needs the "Activity logs: Read" permission and is sent as a bearer token.
+# Only auth_type "apikey" is accepted. The Stripe-Version header is required.
+# page is managed by the collector and must not be set. Each poll re-reads all
+# retained records, so keep sleeptime at 300 or more. Records hold personal
+# data such as emails, IP addresses, locations and user agents.
+#    - enabled: true
+#      name: "stripe-activity-logs"
+#      subject: "StripeActivityLogs"
+#      endpoint: "https://api.stripe.com/v2/iam/activity_logs"
+#      method: "get"
+#      auth_type: "apikey"
+#      api_key_env: "STRIPE_ACTIVITY_LOGS_KEY"
+#      sleeptime: 300
+#      timeout: 30
+#      headers:
+#        - key: "Stripe-Version"
+#          value: "2026-11-18.preview"
+#      params:
+#        limit: "100"             # Optional, 1-100, default 100
+#        #"action_groups[0]": "api_key"     # Bare or indexed from 0; [] is rejected
+#        #"action_groups[1]": "user_roles"
+#      collector:
+#        type: "stripe_activity_logs"
+#        initial_lookback_hours: 24  # 1-4320, used for outputs with no checkpoint
+#        settle_minutes: 30       # Optional, 10-1440, default 30
+#      outputs: ["siem-webhook"]
+
 webapi:
     -
       enabled: False
