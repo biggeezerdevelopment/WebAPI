@@ -127,4 +127,3 @@ func hasRelNext(params string) bool {
 	}
 	return false
 }
-

@@ -463,7 +463,6 @@ func (c *Collector) fetchWindow(ctx context.Context, floor int64) ([]event, bool
 	return unique, complete, nil
 }
 
-
 // fetchPage retrieves one page, honoring rate limits.
 func (c *Collector) fetchPage(ctx context.Context, pageURL string) (*api.Page, error) {
 	for attempt := 0; ; attempt++ {

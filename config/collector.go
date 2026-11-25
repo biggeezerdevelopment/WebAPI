@@ -87,17 +87,24 @@ func (w *WebAPI) ResolveAPIKey() (string, error) {
 	return value, nil
 }
 
-// collectorValidators holds the rules specific to each collector.type. Each
-// receives the resolved credential.
-var collectorValidators = map[string]func(w *WebAPI, key string) error{
-	CollectorTypeGitHubAudit: validateGitHubAudit,
+// collectorRules holds the rules specific to one collector.type. auth runs
+// with the resolved credential before the shared endpoint check, and params
+// after it, which keeps the order in which errors are reported.
+type collectorRules struct {
+	auth   func(w *WebAPI, key string) error
+	params func(w *WebAPI) error
 }
 
-// validateCollector applies the rules shared by every collector type and then
-// those of the entry's type.
+// collectorValidators selects the per-type rules by collector.type.
+var collectorValidators = map[string]collectorRules{
+	CollectorTypeGitHubAudit: {auth: validateGitHubAuditAuth, params: validateGitHubAuditParams},
+}
+
+// validateCollector applies the rules shared by every collector type and those
+// of the entry's type.
 func (w *WebAPI) validateCollector(stateDir string) error {
 	c := w.Collector
-	validateType, ok := collectorValidators[c.Type]
+	rules, ok := collectorValidators[c.Type]
 	if !ok {
 		return fmt.Errorf("unknown collector.type %q", c.Type)
 	}
@@ -117,19 +124,27 @@ func (w *WebAPI) validateCollector(stateDir string) error {
 	if err != nil {
 		return err
 	}
+	if err := rules.auth(w, key); err != nil {
+		return err
+	}
 	// The collector owns the cursor, so nothing may override or duplicate it.
 	if u, err := url.Parse(w.Endpoint); err != nil || u.RawQuery != "" {
 		return errors.New("collector endpoint must not contain a query string; use params")
 	}
-	return validateType(w, key)
+	return rules.params(w)
 }
 
-// validateGitHubAudit holds the github_audit rules: token auth, and params
-// that leave the created: qualifier and ascending order to the collector.
-func validateGitHubAudit(w *WebAPI, key string) error {
+// validateGitHubAuditAuth requires token auth for github_audit.
+func validateGitHubAuditAuth(w *WebAPI, key string) error {
 	if w.AuthType != "apikey" || key == "" {
 		return errors.New("collector requires auth_type apikey with api_key or api_key_env")
 	}
+	return nil
+}
+
+// validateGitHubAuditParams leaves the created: qualifier and ascending order
+// to the collector.
+func validateGitHubAuditParams(w *WebAPI) error {
 	for _, name := range []string{"after", "before"} {
 		if _, ok := w.Params[name]; ok {
 			return fmt.Errorf("collector manages the %q parameter", name)
