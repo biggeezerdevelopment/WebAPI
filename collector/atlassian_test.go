@@ -160,7 +160,7 @@ func (a *atlassianServer) setHandler(fn func(http.ResponseWriter, *http.Request)
 	a.handler = fn
 }
 
-func (a *atlassianServer) seen()[]map[string]string {
+func (a *atlassianServer) seen() []map[string]string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]map[string]string(nil), a.queries...)
@@ -193,12 +193,15 @@ func (o *idOutput) got() []string {
 	return append([]string(nil), o.ids...)
 }
 
+// fakeAtlassianKey is a placeholder credential sent only to the local test server.
+const fakeAtlassianKey = "placeholder-not-a-real-key"
+
 func buildAtlassian(t *testing.T, a *atlassianServer, dir, limit string, out *idOutput) *Collector {
 	t.Helper()
 	hours := 1
 	source := &config.WebAPI{
 		Enabled: true, Name: "atlassian-org-audit", Endpoint: a.srv.URL + "/admin/v1/orgs/o/events-stream",
-		Method: "get", AuthType: "apikey", APIKey: "test-token", SleepTime: 1, Timeout: 5,
+		Method: "get", AuthType: "apikey", APIKey: fakeAtlassianKey, SleepTime: 1, Timeout: 5,
 		Collector: &config.Collector{Type: config.CollectorTypeAtlassianOrgAudit, InitialLookbackHours: &hours},
 	}
 	if limit != "" {
@@ -272,7 +275,7 @@ func TestAtlassianPaginationAndEndDetection(t *testing.T) {
 			a.mu.Lock()
 			token := a.tokens[0]
 			a.mu.Unlock()
-			if token != "Bearer test-token" {
+			if token != "Bearer "+fakeAtlassianKey {
 				t.Errorf("authorization = %q", token)
 			}
 		})

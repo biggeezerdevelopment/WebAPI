@@ -429,7 +429,7 @@ func (c *Collector) fetchWindow(ctx context.Context, floor int64) ([]event, bool
 			break
 		}
 		if pages >= maxPagesPastFloor {
-			return nil, false, fmt.Errorf("%w: %d pages did not pass the checkpoint, increase per_page", errNoProgress, pages)
+			return nil, false, fmt.Errorf("%w: %d pages did not pass the checkpoint, increase the page size (per_page or limit)", errNoProgress, pages)
 		}
 		if seen[next.String()] {
 			return nil, false, errors.New("pagination loop detected")
