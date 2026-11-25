@@ -87,9 +87,18 @@ func (w *WebAPI) ResolveAPIKey() (string, error) {
 	return value, nil
 }
 
+// collectorValidators holds the rules specific to each collector.type. Each
+// receives the resolved credential.
+var collectorValidators = map[string]func(w *WebAPI, key string) error{
+	CollectorTypeGitHubAudit: validateGitHubAudit,
+}
+
+// validateCollector applies the rules shared by every collector type and then
+// those of the entry's type.
 func (w *WebAPI) validateCollector(stateDir string) error {
 	c := w.Collector
-	if c.Type != CollectorTypeGitHubAudit {
+	validateType, ok := collectorValidators[c.Type]
+	if !ok {
 		return fmt.Errorf("unknown collector.type %q", c.Type)
 	}
 	if err := checkStateDir(stateDir); err != nil {
@@ -108,12 +117,18 @@ func (w *WebAPI) validateCollector(stateDir string) error {
 	if err != nil {
 		return err
 	}
-	if w.AuthType != "apikey" || key == "" {
-		return errors.New("collector requires auth_type apikey with api_key or api_key_env")
-	}
 	// The collector owns the cursor, so nothing may override or duplicate it.
 	if u, err := url.Parse(w.Endpoint); err != nil || u.RawQuery != "" {
 		return errors.New("collector endpoint must not contain a query string; use params")
+	}
+	return validateType(w, key)
+}
+
+// validateGitHubAudit holds the github_audit rules: token auth, and params
+// that leave the created: qualifier and ascending order to the collector.
+func validateGitHubAudit(w *WebAPI, key string) error {
+	if w.AuthType != "apikey" || key == "" {
+		return errors.New("collector requires auth_type apikey with api_key or api_key_env")
 	}
 	for _, name := range []string{"after", "before"} {
 		if _, ok := w.Params[name]; ok {
