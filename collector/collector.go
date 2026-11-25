@@ -21,7 +21,10 @@ import (
 )
 
 const (
-	// maxPagesPerWindow is where a fetch stops once it has passed its floor.
+	// maxPagesPerWindow is how many pages a fetch reads once it has passed its
+	// floor, counting the page that passed it. Pages before that do not count,
+	// so a source that must start below the floor, such as Stripe's, still
+	// moves a full window forward each poll.
 	maxPagesPerWindow = 100
 	// maxPagesPastFloor ends a fetch that still has not passed its floor. The
 	// poll then fails loudly instead of refetching a delivered prefix forever.
@@ -398,6 +401,7 @@ func (c *Collector) fetchWindow(ctx context.Context, floor int64) ([]event, bool
 	current := first
 	complete := false
 	passedFloor := false
+	pagesPastFloor := 0
 	for pages := 1; ; pages++ {
 		page, err := c.fetchPage(ctx, current.String())
 		if err != nil {
@@ -415,6 +419,9 @@ func (c *Collector) fetchWindow(ctx context.Context, floor int64) ([]event, bool
 				passedFloor = true
 			}
 		}
+		if passedFloor {
+			pagesPastFloor++
+		}
 
 		if next == nil {
 			complete = true
@@ -425,7 +432,7 @@ func (c *Collector) fetchWindow(ctx context.Context, floor int64) ([]event, bool
 		if !sameOrigin(next, endpoint) {
 			return nil, false, errors.New("refusing pagination link to a different origin")
 		}
-		if pages >= maxPagesPerWindow && passedFloor {
+		if pagesPastFloor >= maxPagesPerWindow {
 			break
 		}
 		if pages >= maxPagesPastFloor {
