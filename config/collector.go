@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -20,6 +22,9 @@ const (
 	CollectorTypeAtlassianOrgAudit = "atlassian_org_audit"
 	// CollectorTypeJiraAudit polls a Jira Cloud site's audit records.
 	CollectorTypeJiraAudit = "jira_audit"
+	// CollectorTypeStripeActivityLogs polls a Stripe account's security
+	// history through the Activity Logs API.
+	CollectorTypeStripeActivityLogs = "stripe_activity_logs"
 
 	// AuthTypeAPIKey sends api_key as a bearer token.
 	AuthTypeAPIKey = "apikey"
@@ -32,6 +37,13 @@ const (
 	// MaxInitialLookbackHours is 180 days. The bound keeps the first checkpoint
 	// representable, in the past, and after 1970.
 	MaxInitialLookbackHours = 4320
+
+	// DefaultSettleMinutes applies when settle_minutes is omitted. Stripe
+	// says records take at least 10 minutes to appear.
+	DefaultSettleMinutes = 30
+	// MinSettleMinutes and MaxSettleMinutes bound settle_minutes.
+	MinSettleMinutes = 10
+	MaxSettleMinutes = 1440
 )
 
 // Collector selects source-specific polling for a webapi entry.
@@ -40,6 +52,10 @@ type Collector struct {
 	// InitialLookbackHours is a pointer so that an explicit 0 is rejected
 	// rather than treated as omitted.
 	InitialLookbackHours *int `yaml:"initial_lookback_hours"`
+	// SettleMinutes holds back records created less than this many minutes
+	// ago. Only stripe_activity_logs accepts it. A pointer, so an explicit 0
+	// is rejected rather than treated as omitted.
+	SettleMinutes *int `yaml:"settle_minutes"`
 }
 
 // LookbackHours returns the configured lookback or the default.
@@ -48,6 +64,14 @@ func (c *Collector) LookbackHours() int {
 		return DefaultInitialLookbackHours
 	}
 	return *c.InitialLookbackHours
+}
+
+// SettleDelay returns the configured settle delay or the default.
+func (c *Collector) SettleDelay() time.Duration {
+	if c.SettleMinutes == nil {
+		return DefaultSettleMinutes * time.Minute
+	}
+	return time.Duration(*c.SettleMinutes) * time.Minute
 }
 
 // UnmarshalYAML records which credential keys are present, and keeps a null
@@ -125,9 +149,10 @@ type collectorRules struct {
 
 // collectorValidators selects the per-type rules by collector.type.
 var collectorValidators = map[string]collectorRules{
-	CollectorTypeGitHubAudit:       {authType: AuthTypeAPIKey, params: validateGitHubAuditParams},
-	CollectorTypeAtlassianOrgAudit: {authType: AuthTypeAPIKey, params: validateAtlassianOrgAuditParams},
-	CollectorTypeJiraAudit:         {authType: AuthTypeBasic, params: validateJiraAuditParams},
+	CollectorTypeGitHubAudit:        {authType: AuthTypeAPIKey, params: validateGitHubAuditParams},
+	CollectorTypeAtlassianOrgAudit:  {authType: AuthTypeAPIKey, params: validateAtlassianOrgAuditParams},
+	CollectorTypeJiraAudit:          {authType: AuthTypeBasic, params: validateJiraAuditParams},
+	CollectorTypeStripeActivityLogs: {authType: AuthTypeAPIKey, params: validateStripeActivityLogs},
 }
 
 // CheckAuth reports whether the entry is configured for authType with a
@@ -169,6 +194,9 @@ func (w *WebAPI) validateCollector(stateDir string) error {
 	}
 	if hours := c.LookbackHours(); hours < 1 || hours > MaxInitialLookbackHours {
 		return fmt.Errorf("collector.initial_lookback_hours must be between 1 and %d, got %d", MaxInitialLookbackHours, hours)
+	}
+	if c.SettleMinutes != nil && c.Type != CollectorTypeStripeActivityLogs {
+		return fmt.Errorf("collector.settle_minutes is only supported by %s", CollectorTypeStripeActivityLogs)
 	}
 	if !strings.EqualFold(w.Method, http.MethodGet) {
 		return errors.New("collector requires method get")
@@ -238,6 +266,88 @@ func validateJiraAuditParams(w *WebAPI) error {
 		}
 	}
 	return nil
+}
+
+// stripeArrayFilters are the list filters the Activity Logs API accepts.
+var stripeArrayFilters = map[string]bool{"actions": true, "action_groups": true, "logs_from": true}
+
+// validateStripeActivityLogs checks the Stripe-Version header, the settle
+// delay and params. page belongs to the collector. A filter holds one value
+// bare, or several in Stripe's indexed form (actions[0], actions[1]), because
+// params cannot repeat a key and Stripe rejects the [] form.
+func validateStripeActivityLogs(w *WebAPI) error {
+	if !hasHeader(w.Headers, "Stripe-Version") {
+		return errors.New("collector requires a Stripe-Version header")
+	}
+	if m := w.Collector.SettleMinutes; m != nil && (*m < MinSettleMinutes || *m > MaxSettleMinutes) {
+		return fmt.Errorf("collector.settle_minutes must be between %d and %d, got %d", MinSettleMinutes, MaxSettleMinutes, *m)
+	}
+	bare := map[string]bool{}
+	indexes := map[string][]int{}
+	for key, value := range w.Params {
+		switch {
+		case key == "page":
+			return errors.New(`collector manages the "page" parameter`)
+		case key == "limit":
+			if n, err := strconv.Atoi(value); err != nil || n < 1 || n > 100 {
+				return errors.New("collector requires params.limit to be a whole number from 1 to 100")
+			}
+		case strings.HasSuffix(key, "[]"):
+			return fmt.Errorf("params key %q uses [] array syntax, which Stripe rejects; use indexed keys such as actions[0]", key)
+		case stripeArrayFilters[key]:
+			bare[key] = true
+		default:
+			name, index, ok := parseIndexedKey(key)
+			if !ok || !stripeArrayFilters[name] {
+				return fmt.Errorf("unknown parameter %q for %s", key, CollectorTypeStripeActivityLogs)
+			}
+			indexes[name] = append(indexes[name], index)
+		}
+	}
+	for name, list := range indexes {
+		if bare[name] {
+			return fmt.Errorf("params.%s cannot be both bare and indexed", name)
+		}
+		sort.Ints(list)
+		for i, n := range list {
+			if n != i {
+				return fmt.Errorf("params.%s indexes must run from 0 without gaps", name)
+			}
+		}
+	}
+	return nil
+}
+
+// parseIndexedKey splits name[N] into name and N. N must be plain decimal
+// digits without a leading zero, so each index has exactly one spelling.
+func parseIndexedKey(key string) (string, int, bool) {
+	open := strings.IndexByte(key, '[')
+	if open <= 0 || !strings.HasSuffix(key, "]") {
+		return "", 0, false
+	}
+	digits := key[open+1 : len(key)-1]
+	if digits == "" || len(digits) > 6 || (len(digits) > 1 && digits[0] == '0') {
+		return "", 0, false
+	}
+	n := 0
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return "", 0, false
+		}
+		n = n*10 + int(r-'0')
+	}
+	return key[:open], n, true
+}
+
+// hasHeader reports whether headers set name (case-insensitively) to a
+// non-empty value.
+func hasHeader(headers []Header, name string) bool {
+	for _, h := range headers {
+		if strings.EqualFold(strings.TrimSpace(h.Key), name) && strings.TrimSpace(h.Value) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // checkStateDir creates the directory if needed and proves it is writable. The
