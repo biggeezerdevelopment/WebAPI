@@ -16,6 +16,11 @@ const (
 	// CollectorTypeGitHubAudit polls a GitHub organization audit log.
 	CollectorTypeGitHubAudit = "github_audit"
 
+	// AuthTypeAPIKey sends api_key as a bearer token.
+	AuthTypeAPIKey = "apikey"
+	// AuthTypeBasic sends api_username and api_password as basic auth.
+	AuthTypeBasic = "basic"
+
 	// DefaultInitialLookbackHours applies when initial_lookback_hours is omitted.
 	DefaultInitialLookbackHours = 24
 
@@ -49,9 +54,11 @@ func (w *WebAPI) UnmarshalYAML(node *yaml.Node) error {
 		return err
 	}
 	var raw struct {
-		APIKey    yaml.Node `yaml:"api_key"`
-		APIKeyEnv yaml.Node `yaml:"api_key_env"`
-		Collector yaml.Node `yaml:"collector"`
+		APIKey         yaml.Node `yaml:"api_key"`
+		APIKeyEnv      yaml.Node `yaml:"api_key_env"`
+		APIPassword    yaml.Node `yaml:"api_password"`
+		APIPasswordEnv yaml.Node `yaml:"api_password_env"`
+		Collector      yaml.Node `yaml:"collector"`
 	}
 	if err := node.Decode(&raw); err != nil {
 		return err
@@ -59,6 +66,8 @@ func (w *WebAPI) UnmarshalYAML(node *yaml.Node) error {
 	*w = WebAPI(decoded)
 	w.apiKeySet = raw.APIKey.Kind != 0
 	w.apiKeyEnvSet = raw.APIKeyEnv.Kind != 0
+	w.apiPasswordSet = raw.APIPassword.Kind != 0
+	w.apiPasswordEnvSet = raw.APIPasswordEnv.Kind != 0
 	if raw.Collector.Kind != 0 && w.Collector == nil {
 		w.Collector = &Collector{}
 	}
@@ -68,36 +77,76 @@ func (w *WebAPI) UnmarshalYAML(node *yaml.Node) error {
 // ResolveAPIKey returns the inline key or the value of api_key_env. Errors name
 // the variable but never the value.
 func (w *WebAPI) ResolveAPIKey() (string, error) {
-	if (w.apiKeySet && w.apiKeyEnvSet) || (w.APIKey != "" && w.APIKeyEnv != "") {
-		return "", errors.New("api_key and api_key_env cannot both be set")
+	return resolveSecret("api_key", w.APIKey, w.apiKeySet, w.APIKeyEnv, w.apiKeyEnvSet)
+}
+
+// ResolveAPIPassword returns the inline password or the value of
+// api_password_env. Errors name the variable but never the value.
+func (w *WebAPI) ResolveAPIPassword() (string, error) {
+	return resolveSecret("api_password", w.APIPassword, w.apiPasswordSet, w.APIPasswordEnv, w.apiPasswordEnvSet)
+}
+
+// resolveSecret implements the inline-or-environment rule for a credential
+// key. The *Set flags record that YAML named the key, so an empty value still
+// counts as set.
+func resolveSecret(key, inline string, inlineSet bool, envName string, envSet bool) (string, error) {
+	envKey := key + "_env"
+	if (inlineSet && envSet) || (inline != "" && envName != "") {
+		return "", fmt.Errorf("%s and %s cannot both be set", key, envKey)
 	}
-	if w.APIKeyEnv == "" {
-		if w.apiKeyEnvSet {
-			return "", errors.New("api_key_env must name an environment variable")
+	if envName == "" {
+		if envSet {
+			return "", fmt.Errorf("%s must name an environment variable", envKey)
 		}
-		return w.APIKey, nil
+		return inline, nil
 	}
-	value := os.Getenv(w.APIKeyEnv)
+	value := os.Getenv(envName)
 	if strings.TrimSpace(value) == "" {
-		return "", fmt.Errorf("environment variable %q named by api_key_env is unset or empty", w.APIKeyEnv)
+		return "", fmt.Errorf("environment variable %q named by %s is unset or empty", envName, envKey)
 	}
 	if !isHeaderValue(value) {
-		return "", fmt.Errorf("environment variable %q named by api_key_env contains invalid characters", w.APIKeyEnv)
+		return "", fmt.Errorf("environment variable %q named by %s contains invalid characters", envName, envKey)
 	}
 	return value, nil
 }
 
-// collectorRules holds the rules specific to one collector.type. auth runs
-// with the resolved credential before the shared endpoint check, and params
-// after it, which keeps the order in which errors are reported.
+// collectorRules holds the rules specific to one collector.type. authType is
+// checked with CheckAuth before the shared endpoint check, and params after
+// it, which keeps the order in which errors are reported.
 type collectorRules struct {
-	auth   func(w *WebAPI, key string) error
-	params func(w *WebAPI) error
+	authType string
+	params   func(w *WebAPI) error
 }
 
 // collectorValidators selects the per-type rules by collector.type.
 var collectorValidators = map[string]collectorRules{
-	CollectorTypeGitHubAudit: {auth: validateGitHubAuditAuth, params: validateGitHubAuditParams},
+	CollectorTypeGitHubAudit: {authType: AuthTypeAPIKey, params: validateGitHubAuditParams},
+}
+
+// CheckAuth reports whether the entry is configured for authType with a
+// credential that resolves. Collector types use it to state their auth rule.
+func (w *WebAPI) CheckAuth(authType string) error {
+	switch authType {
+	case AuthTypeAPIKey:
+		key, err := w.ResolveAPIKey()
+		if err != nil {
+			return err
+		}
+		if w.AuthType != AuthTypeAPIKey || key == "" {
+			return errors.New("collector requires auth_type apikey with api_key or api_key_env")
+		}
+	case AuthTypeBasic:
+		password, err := w.ResolveAPIPassword()
+		if err != nil {
+			return err
+		}
+		if w.AuthType != AuthTypeBasic || w.APIUsername == "" || password == "" {
+			return errors.New("collector requires auth_type basic with api_username and api_password or api_password_env")
+		}
+	default:
+		return fmt.Errorf("unsupported auth_type %q", authType)
+	}
+	return nil
 }
 
 // validateCollector applies the rules shared by every collector type and those
@@ -120,11 +169,7 @@ func (w *WebAPI) validateCollector(stateDir string) error {
 	if !w.Body.IsEmpty() {
 		return errors.New("collector does not accept a body")
 	}
-	key, err := w.ResolveAPIKey()
-	if err != nil {
-		return err
-	}
-	if err := rules.auth(w, key); err != nil {
+	if err := w.CheckAuth(rules.authType); err != nil {
 		return err
 	}
 	// The collector owns the cursor, so nothing may override or duplicate it.
@@ -132,14 +177,6 @@ func (w *WebAPI) validateCollector(stateDir string) error {
 		return errors.New("collector endpoint must not contain a query string; use params")
 	}
 	return rules.params(w)
-}
-
-// validateGitHubAuditAuth requires token auth for github_audit.
-func validateGitHubAuditAuth(w *WebAPI, key string) error {
-	if w.AuthType != "apikey" || key == "" {
-		return errors.New("collector requires auth_type apikey with api_key or api_key_env")
-	}
-	return nil
 }
 
 // validateGitHubAuditParams leaves the created: qualifier and ascending order

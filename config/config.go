@@ -99,12 +99,17 @@ type WebAPI struct {
 	Outputs []string `yaml:"outputs"`
 	// APIKeyEnv names an environment variable holding the API key.
 	APIKeyEnv string `yaml:"api_key_env"`
+	// APIPasswordEnv names an environment variable holding the basic-auth
+	// password, typically an API token.
+	APIPasswordEnv string `yaml:"api_password_env"`
 	// Collector enables checkpointed collection; nil is a plain source.
 	Collector *Collector `yaml:"collector"`
 
 	// These record which keys YAML named, even with empty values.
-	apiKeySet    bool
-	apiKeyEnvSet bool
+	apiKeySet         bool
+	apiKeyEnvSet      bool
+	apiPasswordSet    bool
+	apiPasswordEnvSet bool
 }
 
 type APILogRemote struct {
@@ -200,6 +205,18 @@ func (w *WebAPI) validate() error {
 	}
 	if _, err := w.ResolveAPIKey(); err != nil {
 		return err
+	}
+	password, err := w.ResolveAPIPassword()
+	if err != nil {
+		return err
+	}
+	if w.AuthType == AuthTypeBasic {
+		if w.APIUsername == "" {
+			return errors.New("auth_type basic requires api_username")
+		}
+		if password == "" {
+			return errors.New("auth_type basic requires api_password or api_password_env")
+		}
 	}
 	return nil
 }
