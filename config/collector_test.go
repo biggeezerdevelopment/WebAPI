@@ -185,6 +185,21 @@ func TestCollectorRejectsCursorOverridesAndEmptyRoutes(t *testing.T) {
 	}
 }
 
+// The per-type auth rule runs before the shared endpoint check, so an entry
+// breaking both reports the auth error, as it did before the split.
+func TestCollectorAuthErrorPrecedesQueryStringError(t *testing.T) {
+	t.Setenv("TEST_AUDIT_TOKEN", "secret-token-value")
+	w := &WebAPI{
+		Enabled: true, Name: "a", Endpoint: "https://api.github.com/x?phrase=x", Method: "get",
+		APIKeyEnv: "TEST_AUDIT_TOKEN", SleepTime: 1, Timeout: 1,
+		Collector: &Collector{Type: CollectorTypeGitHubAudit},
+	}
+	err := w.validateCollector(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "auth_type apikey") {
+		t.Fatalf("err = %v, want the auth error", err)
+	}
+}
+
 func TestNullCollectorIsNotAPlainSource(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	text := "webapi:\n  - enabled: true\n    name: a\n    endpoint: https://example.com/x\n    method: get\n    sleeptime: 1\n    timeout: 1\n    collector:\n"

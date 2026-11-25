@@ -199,9 +199,9 @@ func TestPaginationOrderAndQuery(t *testing.T) {
 }
 
 func TestUserPhraseIsKept(t *testing.T) {
-	c := &Collector{opts: Options{Source: testSource("https://example.test/a")}}
-	c.opts.Source.Params["phrase"] = "action:org.add_member"
-	u, err := c.firstPageURL(0)
+	g := &githubSource{source: testSource("https://example.test/a")}
+	g.source.Params["phrase"] = "action:org.add_member"
+	u, err := g.FirstPage(0, testNow)
 	if err != nil {
 		t.Fatal(err)
 	}
