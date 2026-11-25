@@ -133,12 +133,16 @@ func (j *jiraSource) ParsePage(cur *url.URL, page *api.Page) ([]event, *url.URL,
 			return nil, nil, errors.New("jira records shifted between pages")
 		}
 	}
-	events, err := j.accept(resp.records)
+	if err := checkJiraOrder(resp.records); err != nil {
+		return nil, nil, err
+	}
+	// Only the new records continue the window's order; the overlap was
+	// checked when it was first read and matched by id above.
+	events, err := j.accept(resp.records[:keep])
 	if err != nil {
 		return nil, nil, err
 	}
 	j.pageEnd, j.edgeID = offset, resp.records[0].id
-	events = events[len(events)-keep:]
 	if offset == 0 {
 		return events, nil, nil
 	}
@@ -170,10 +174,8 @@ func (j *jiraSource) dataPage(cur *url.URL, offset int) ([]event, *url.URL, erro
 // accept checks that a newest-first page continues the window's order, then
 // returns it oldest first.
 func (j *jiraSource) accept(records []event) ([]event, error) {
-	for i := 1; i < len(records); i++ {
-		if records[i].ts > records[i-1].ts {
-			return nil, errors.New("jira audit records are not newest first: the API order is not as expected")
-		}
+	if err := checkJiraOrder(records); err != nil {
+		return nil, err
 	}
 	if n := len(records); n > 0 {
 		if j.haveSeen && records[n-1].ts < j.newestSeen {
@@ -186,6 +188,17 @@ func (j *jiraSource) accept(records []event) ([]event, error) {
 		out[len(records)-1-i] = ev
 	}
 	return out, nil
+}
+
+// checkJiraOrder rejects a page that is not newest first (non-increasing
+// created).
+func checkJiraOrder(records []event) error {
+	for i := 1; i < len(records); i++ {
+		if records[i].ts > records[i-1].ts {
+			return errors.New("jira audit records are not newest first: the API order is not as expected")
+		}
+	}
+	return nil
 }
 
 // checkJiraCount rejects a page that would leave a gap or overlap.
