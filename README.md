@@ -236,6 +236,37 @@ webapi:
 - The first request of a window asks for `from` one hour before the checkpoint, with `sortOrder=asc`. Atlassian does not document which timestamp `from` filters on, and an event's time can be earlier than its processing time. The overlap covers that, and the checkpoint filters out events that were already delivered.
 - Pages are followed with `cursor` set to `meta.next`. The API may return `meta.next` on the last page so that clients can poll for new events, so the window also ends when a page holds fewer than `limit` events.
 
+### Jira Cloud Audit Records Collector
+
+The `jira_audit` collector polls a Jira Cloud site's audit records (`GET https://<site>.atlassian.net/rest/api/3/auditing/record`) and sends each record, unchanged, to the routed outputs. It uses the same engine as `github_audit`.
+
+```yaml
+webapi:
+  - enabled: true
+    name: "jira-audit"
+    subject: "JiraAudit"
+    endpoint: "https://example.atlassian.net/rest/api/3/auditing/record"
+    method: "get"
+    auth_type: "basic"
+    api_username: "svc-audit@example.com"
+    api_password_env: "JIRA_API_TOKEN"
+    sleeptime: 300
+    timeout: 30
+    params:
+      limit: "1000"            # optional, 1-1000, default 1000
+      #filter: "user management"
+    collector:
+      type: "jira_audit"
+      initial_lookback_hours: 24
+    outputs: ["siem-webhook"]
+```
+
+- The account needs the **Administer Jira** global permission. Authenticate with its email as `api_username` and an API token in `api_password_env`. Only `auth_type: basic` is accepted.
+- The collector manages `from`, `to` and `offset`, so they cannot be set in `params`. `limit` must be a whole number from 1 to 1000. `filter` is passed through.
+- Each window fixes `to` at now minus 60 seconds and `from` at the checkpoint rounded down to the second, both formatted as `2006-01-02T15:04:05.000+0000` in UTC. It requests `offset=0&limit=1` to read `total`, then reads pages from the last offset back to 0 and reverses each one, so records come out oldest first.
+- Atlassian does not document the sort order. The collector expects newest first and fails the poll if a page, or the boundary between two pages, is in another order. It also fails the poll if `total` changes during the window or a page holds the wrong number of records. The engine retries on the next cycle.
+- Records are keyed by `records[].id` (an integer) and ordered by `created`, which may use a `+0000`-style offset or RFC 3339. A record with a missing or invalid `id` or `created` fails the poll.
+
 ## Building
 
 To build the project:

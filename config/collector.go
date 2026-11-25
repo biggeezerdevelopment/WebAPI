@@ -18,6 +18,8 @@ const (
 	// CollectorTypeAtlassianOrgAudit polls an Atlassian organization's audit
 	// log through the events-stream API.
 	CollectorTypeAtlassianOrgAudit = "atlassian_org_audit"
+	// CollectorTypeJiraAudit polls a Jira Cloud site's audit records.
+	CollectorTypeJiraAudit = "jira_audit"
 
 	// AuthTypeAPIKey sends api_key as a bearer token.
 	AuthTypeAPIKey = "apikey"
@@ -125,6 +127,7 @@ type collectorRules struct {
 var collectorValidators = map[string]collectorRules{
 	CollectorTypeGitHubAudit:       {authType: AuthTypeAPIKey, params: validateGitHubAuditParams},
 	CollectorTypeAtlassianOrgAudit: {authType: AuthTypeAPIKey, params: validateAtlassianOrgAuditParams},
+	CollectorTypeJiraAudit:         {authType: AuthTypeBasic, params: validateJiraAuditParams},
 }
 
 // CheckAuth reports whether the entry is configured for authType with a
@@ -216,6 +219,22 @@ func validateAtlassianOrgAuditParams(w *WebAPI) error {
 	if limit, ok := w.Params["limit"]; ok {
 		if n, err := strconv.Atoi(limit); err != nil || n < 1 || n > 500 {
 			return errors.New("collector requires params.limit to be a whole number from 1 to 500")
+		}
+	}
+	return nil
+}
+
+// validateJiraAuditParams leaves the time range and offset to the collector
+// and bounds the page size.
+func validateJiraAuditParams(w *WebAPI) error {
+	for _, name := range []string{"from", "to", "offset"} {
+		if _, ok := w.Params[name]; ok {
+			return fmt.Errorf("collector manages the %q parameter", name)
+		}
+	}
+	if limit, ok := w.Params["limit"]; ok {
+		if n, err := strconv.Atoi(limit); err != nil || n < 1 || n > 1000 {
+			return errors.New("collector requires params.limit to be a whole number from 1 to 1000")
 		}
 	}
 	return nil

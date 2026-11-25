@@ -111,6 +111,28 @@ apilogremote:
 #        initial_lookback_hours: 24  # 1-4320, used for outputs with no checkpoint
 #      outputs: ["siem-webhook"]
 
+# Jira Cloud audit records source, added under webapi. The account needs the
+# "Administer Jira" global permission. Basic auth uses its email and an API
+# token read from the environment; only auth_type "basic" is accepted. from,
+# to and offset are managed by the collector and must not be set.
+#    - enabled: true
+#      name: "jira-audit"
+#      subject: "JiraAudit"
+#      endpoint: "https://<site>.atlassian.net/rest/api/3/auditing/record"
+#      method: "get"
+#      auth_type: "basic"
+#      api_username: "svc-audit@example.com"
+#      api_password_env: "JIRA_API_TOKEN"
+#      sleeptime: 300
+#      timeout: 30
+#      params:
+#        limit: "1000"            # Optional, 1-1000, default 1000
+#        #filter: "user management"
+#      collector:
+#        type: "jira_audit"
+#        initial_lookback_hours: 24  # 1-4320, used for outputs with no checkpoint
+#      outputs: ["siem-webhook"]
+
 webapi:
     -
       enabled: False
