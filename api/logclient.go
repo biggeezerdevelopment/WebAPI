@@ -114,7 +114,7 @@ func (c *LogClient) SendLog(ctx context.Context, agentID, agentName, source stri
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("unexpected status code from log API: %d", resp.StatusCode)
+		return StatusError("log API", resp.StatusCode)
 	}
 
 	return nil
