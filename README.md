@@ -324,6 +324,8 @@ go build -o webapi-agent
 ./webapi-agent
 ```
 
+The agent reads `config.yml` from its working directory. To run it as a systemd or Windows service and keep credentials out of the config, see [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## Features
 
 - Multiple API monitoring support
