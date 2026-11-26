@@ -47,6 +47,7 @@ apilogremote:
     api_url: "http://localhost:8080/api/v1/logs"
     api_method: "POST"
     skip_verify: false           # Skip TLS certificate verification (default: false)
+    api_timeout: 30              # Seconds (1-3600), default 30, covering all retries of one record
     api_headers:
         - key: "Content-Type"
           value: "application/json"
@@ -67,7 +68,10 @@ webapi:
           value: "application/json"
       auth_type: "apikey"       # Authentication type
       api_key: "1234567890"     # API key for authentication
-      skip_verify: true         # Skip SSL verification
+      skip_verify: true         # Shorthand for tls.skip_verify. Do not combine with tls
+      # tls:                    # Same options and rules as an output's tls
+      #   ca_file: "/etc/webapi/certs/internal-ca.pem"
+      #   server_name: "api.internal"
       sleeptime: 30            # Time between requests in seconds
       timeout: 30              # Request timeout in seconds
       params:
@@ -76,6 +80,8 @@ webapi:
         - "metrics"            # Request body parameters
       outputs: ["siem-webhook"] # Optional routing, see Log Outputs
 ```
+
+**Source TLS.** A `webapi` entry accepts an optional `tls` section with `ca_file`, `cert_file` and `key_file` (mutual TLS), `server_name` and `skip_verify`. The rules match output TLS (see **TLS** under Log Outputs), including TLS 1.2 or later. The top-level `skip_verify` is shorthand for `tls.skip_verify`. Setting a top-level `skip_verify`, even `false`, together with `tls` is a startup error, so there is one place to look. A bad TLS file is a startup error that names the source and the file.
 
 ### Log Outputs
 
@@ -121,7 +127,7 @@ When `apilogremote` is enabled it is available as an output named `apilogremote`
 - `server_name` overrides the name used for certificate verification.
 - `skip_verify: true` disables verification and cannot be combined with `ca_file`.
 
-The agent logs a startup warning for plaintext `http` webhooks, plaintext `tcp` or `udp` syslog, and `skip_verify: true`.
+The agent logs a startup warning for plaintext `http` webhooks and sources, plaintext `tcp` or `udp` syslog, and `skip_verify: true` on an output or source.
 
 **Syslog.** A `syslog` output sends RFC 5424 messages to a remote server:
 
@@ -148,7 +154,7 @@ logoutputs:
 - `tls` and `tcp` reuse one connection with octet-counted framing (RFC 5425) and reconnect after a failure. A record that was resent after a failed write can arrive twice.
 - `udp` sends one datagram per message. A message over 65,000 bytes is dropped with an error rather than truncated, and operating system limits on datagram size may be lower.
 
-**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request or message and retried up to 3 times with exponential backoff within the output's `timeout`. Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged. The optional heartbeat (see Heartbeat) reports these outcomes. Collector sources (`github_audit`, `atlassian_org_audit`, `jira_audit`, `stripe_activity_logs`) use the stronger delivery described below.
+**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request or message and retried up to 3 times with exponential backoff within the output's `timeout` (`api_timeout` for `apilogremote`). Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged. The optional heartbeat (see Heartbeat) reports these outcomes. Collector sources (`github_audit`, `atlassian_org_audit`, `jira_audit`, `stripe_activity_logs`) use the stronger delivery described below.
 
 ### Heartbeat
 
@@ -257,7 +263,7 @@ heartbeat:
 - Control characters such as newlines become spaces.
 - Text is cut to 512 bytes on a character boundary and ends with `…`.
 
-**Heartbeat delivery.** Heartbeats use the normal retries within each output's `timeout`, except `apilogremote`, which is sent once and not retried. A failed heartbeat is logged, and the heartbeat's own deliveries are not tracked in later heartbeats. The SIEM sees a missing heartbeat instead, which is the signal to alert on.
+**Heartbeat delivery.** Heartbeats use the normal retries within each output's `timeout` (`api_timeout` for `apilogremote`). A failed heartbeat is logged, and the heartbeat's own deliveries are not tracked in later heartbeats. The SIEM sees a missing heartbeat instead, which is the signal to alert on.
 
 **Suggested SIEM rules.**
 
@@ -439,7 +445,16 @@ go build -o webapi-agent
 ./webapi-agent
 ```
 
-The agent reads `config.yml` from its working directory. To run it as a systemd or Windows service and keep credentials out of the config, see [DEPLOYMENT.md](DEPLOYMENT.md).
+The agent reads `config.yml` from its working directory. Command-line flags:
+
+- `-config <path>` reads another file. A relative path, like a relative `state_dir`, resolves against the working directory, not the config file's folder.
+- `-check-config` loads and validates the config, prints warnings, builds the outputs, collectors and heartbeat, and exits without polling. It exits 0 and prints `configuration OK` when the config is valid, 1 on an error, and 2 on a usage error. It never writes checkpoint files, but like a normal start it creates `state_dir` if missing and checks that it is writable.
+
+```bash
+./webapi-agent -config /etc/webapi/config.yml -check-config
+```
+
+The agent stops gracefully on SIGINT or SIGTERM (see Error Handling). To run it as a systemd or Windows service and keep credentials out of the config, see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Features
 
@@ -448,15 +463,17 @@ The agent reads `config.yml` from its working directory. To run it as a systemd 
 - Per-output checkpoints saved atomically in `state_dir`
 - Named outputs: `webhook` and `syslog` (`tls`, `tcp` or `udp`), plus `apilogremote`
 - Per-source routing with `outputs`
-- Retries with exponential backoff within each named output's `timeout` (`apilogremote` is not retried)
+- Retries with exponential backoff within each output's `timeout` (`api_timeout` for `apilogremote`)
 - Authentication:
   - API Key
   - Basic Authentication
 - Secrets from the environment: `api_key_env`, `api_password_env`, header `value_env`
 - Customizable headers, query parameters and request body
-- TLS 1.2+ with verification by default, custom CA (`ca_file`), mutual TLS and `server_name`
+- TLS 1.2+ with verification by default, custom CA (`ca_file`), mutual TLS and `server_name`, for sources and outputs
 - Configurable request intervals and timeouts
 - Heartbeat with per-source poll and delivery status
+- Graceful shutdown on SIGINT or SIGTERM, bounded at 30 seconds
+- `-config` and `-check-config` command-line flags
 
 ## Project Structure
 
@@ -481,10 +498,11 @@ The agent reads `config.yml` from its working directory. To run it as a systemd 
 
 - A failed plain API request is logged and still forwarded, with null data.
 - A failed collector poll is logged and forwards nothing. The next poll resumes from each output's checkpoint.
-- Named output sends are retried up to 3 times within the output's `timeout`. Failures and dropped records are logged with the source and output names.
+- Output sends, including `apilogremote`, are retried up to 3 times within the output's `timeout` (`api_timeout` for `apilogremote`). Failures and dropped records are logged with the source and output names.
 - A collector output that keeps failing is retried with a doubling delay of up to one hour.
-- An invalid config, an unset or empty environment variable, a bad TLS file, or a corrupt state file stops startup. Errors name the variable, never its value.
+- An invalid config, an unset or empty environment variable, a bad TLS file on a source or output, or a corrupt state file stops startup. Errors name the variable, never its value.
 - The heartbeat reports poll and delivery errors, with credentials removed from the error text.
+- On SIGINT or SIGTERM the agent stops polling and waits up to 30 seconds for in-flight requests and deliveries, then closes its outputs. It exits 0, or 1 if that wait timed out. A second signal exits at once. A poll or delivery cut off by shutdown is not reported or forwarded, and its checkpoint does not advance.
 
 ## Contributing
 

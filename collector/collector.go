@@ -89,6 +89,10 @@ type Options struct {
 	Outputs  []output.NamedOutput
 	// Status, when set, is told each poll and delivery outcome.
 	Status StatusHook
+	// ReadOnly loads and checks state without saving the initial checkpoints
+	// of new outputs. It is for validating a configuration; such a Collector
+	// must not be run.
+	ReadOnly bool
 }
 
 // Collector polls one checkpointed audit-log source.
@@ -140,7 +144,7 @@ func newCollectorWithSource(opts Options, src Source, now func() time.Time) (*Co
 			added = true
 		}
 	}
-	if added {
+	if added && !opts.ReadOnly {
 		if err := saveState(path, opts.Source.Name, state); err != nil {
 			return nil, err
 		}

@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"webapi/config"
+	"webapi/tlsconfig"
 )
 
 // maxPageBytes bounds one paginated response held in memory.
@@ -26,12 +26,15 @@ type Client struct {
 	password   string
 }
 
-func NewClient(apiConfig *config.WebAPI) *Client {
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: apiConfig.SkipVerify,
-		},
+// NewClient builds a client for a source. Its TLS settings come from the
+// source's tls section, or the top-level skip_verify, through tlsconfig, so a
+// bad certificate or key file is an error. Errors name files, never contents.
+func NewClient(apiConfig *config.WebAPI) (*Client, error) {
+	tlsCfg, err := tlsconfig.Build(apiConfig.TLSOptions())
+	if err != nil {
+		return nil, fmt.Errorf("tls: %w", err)
 	}
+	tr := &http.Transport{TLSClientConfig: tlsCfg}
 
 	client := &http.Client{
 		Transport: tr,
@@ -56,10 +59,11 @@ func NewClient(apiConfig *config.WebAPI) *Client {
 		config:     apiConfig,
 		apiKey:     apiKey,
 		password:   password,
-	}
+	}, nil
 }
 
-func (c *Client) SendRequest() ([]byte, error) {
+// SendRequest performs one poll. It stops when ctx is canceled.
+func (c *Client) SendRequest(ctx context.Context) ([]byte, error) {
 	payload, err := c.config.Body.Payload()
 	if err != nil {
 		return nil, fmt.Errorf("error encoding body: %v", err)
@@ -71,7 +75,8 @@ func (c *Client) SendRequest() ([]byte, error) {
 		body = bytes.NewReader(payload)
 	}
 
-	req, err := http.NewRequest(
+	req, err := http.NewRequestWithContext(
+		ctx,
 		strings.ToUpper(c.config.Method),
 		c.config.Endpoint,
 		body,
@@ -98,6 +103,9 @@ func (c *Client) SendRequest() ([]byte, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil, fmt.Errorf("request canceled: %w", context.Canceled)
+		}
 		return nil, fmt.Errorf("error sending request: %v", err)
 	}
 	defer resp.Body.Close()

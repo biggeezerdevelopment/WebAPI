@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"webapi/tlsconfig"
 )
 
 var validHTTPMethods = map[string]bool{
@@ -104,13 +106,32 @@ type WebAPI struct {
 	APIPasswordEnv string `yaml:"api_password_env"`
 	// Collector enables checkpointed collection; nil is a plain source.
 	Collector *Collector `yaml:"collector"`
+	// TLS configures the source's client TLS, with the same rules as an
+	// output's tls section. nil means system roots and SkipVerify; use
+	// TLSOptions rather than reading it directly.
+	TLS *tlsconfig.Options `yaml:"tls"`
 
 	// These record which keys YAML named, even with empty values.
 	apiKeySet         bool
 	apiKeyEnvSet      bool
 	apiPasswordSet    bool
 	apiPasswordEnvSet bool
+	skipVerifySet     bool
 }
+
+// TLSOptions returns the source's client TLS settings. The top-level
+// skip_verify is shorthand for tls.skip_verify; validation rejects setting
+// both a top-level skip_verify and a tls section.
+func (w *WebAPI) TLSOptions() tlsconfig.Options {
+	if w.TLS == nil {
+		return tlsconfig.Options{SkipVerify: w.SkipVerify}
+	}
+	return *w.TLS
+}
+
+// DefaultAPILogRemoteTimeout is the apilogremote timeout in seconds when
+// api_timeout is omitted. It was the fixed per-request timeout before retries.
+const DefaultAPILogRemoteTimeout = 30
 
 type APILogRemote struct {
 	Enabled    bool     `yaml:"enabled"`
@@ -118,6 +139,17 @@ type APILogRemote struct {
 	APIMethod  string   `yaml:"api_method"`
 	APIHeaders []Header `yaml:"api_headers"`
 	SkipVerify bool     `yaml:"skip_verify"`
+	// APITimeout bounds one record's delivery, including retries, in seconds.
+	// 0 means DefaultAPILogRemoteTimeout.
+	APITimeout int `yaml:"api_timeout"`
+}
+
+// TimeoutSeconds returns api_timeout, or the default when it is omitted.
+func (l APILogRemote) TimeoutSeconds() int {
+	if l.APITimeout == 0 {
+		return DefaultAPILogRemoteTimeout
+	}
+	return l.APITimeout
 }
 
 type JarvisAgent struct {
@@ -162,6 +194,9 @@ func (c *Config) Validate() error {
 		}
 		if !isHTTPMethod(c.APILogRemote.APIMethod) {
 			return fmt.Errorf("apilogremote: invalid api_method %q", c.APILogRemote.APIMethod)
+		}
+		if t := c.APILogRemote.APITimeout; t < 0 || t > MaxOutputTimeout {
+			return fmt.Errorf("apilogremote: api_timeout must be between 1 and %d seconds, or omitted, got %d", MaxOutputTimeout, t)
 		}
 	}
 
@@ -222,7 +257,32 @@ func (w *WebAPI) validate() error {
 			return errors.New("auth_type basic requires api_password or api_password_env")
 		}
 	}
+	if w.TLS != nil && (w.skipVerifySet || w.SkipVerify) {
+		return errors.New("skip_verify and tls cannot both be set: use tls.skip_verify")
+	}
+	if _, err := tlsconfig.Build(w.TLSOptions()); err != nil {
+		return fmt.Errorf("tls: %w", err)
+	}
 	return nil
+}
+
+// sourceWarnings returns startup warnings for insecure enabled sources. They
+// name the source and never include its endpoint.
+func (c *Config) sourceWarnings() []string {
+	var warnings []string
+	for i := range c.WebAPI {
+		entry := &c.WebAPI[i]
+		if !entry.Enabled {
+			continue
+		}
+		if u, err := url.Parse(entry.Endpoint); err == nil && u.Scheme == "http" {
+			warnings = append(warnings, fmt.Sprintf("source %q uses plaintext http", entry.Name))
+		}
+		if entry.TLSOptions().SkipVerify {
+			warnings = append(warnings, fmt.Sprintf("source %q has TLS verification disabled (skip_verify: true)", entry.Name))
+		}
+	}
+	return warnings
 }
 
 func isHTTPURL(raw string) bool {

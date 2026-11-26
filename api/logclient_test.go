@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,7 +37,7 @@ func sendAndCaptureResults(t *testing.T, apiResults interface{}) string {
 		APIURL:    server.URL,
 		APIMethod: http.MethodPost,
 	})
-	if err := client.SendLog("agent-1", "agent", "source", apiResults); err != nil {
+	if err := client.SendLog(context.Background(), "agent-1", "agent", "source", apiResults); err != nil {
 		t.Fatalf("SendLog returned error: %v", err)
 	}
 
@@ -135,7 +136,7 @@ func TestLogClientRejectsSelfSignedCertificateByDefault(t *testing.T) {
 			server, hits := newSelfSignedServer(t)
 			client := NewLogClient(loadLogConfig(t, server.URL, tt.skipVerifyLine))
 
-			err := client.SendLog("agent-id", "agent-name", "test", nil)
+			err := client.SendLog(context.Background(), "agent-id", "agent-name", "test", nil)
 			if err == nil {
 				t.Fatal("SendLog succeeded against a self-signed server, want certificate error")
 			}
@@ -153,7 +154,7 @@ func TestLogClientAcceptsSelfSignedCertificateWhenSkipVerifyTrue(t *testing.T) {
 	server, hits := newSelfSignedServer(t)
 	client := NewLogClient(loadLogConfig(t, server.URL, "skip_verify: true"))
 
-	if err := client.SendLog("agent-id", "agent-name", "test", nil); err != nil {
+	if err := client.SendLog(context.Background(), "agent-id", "agent-name", "test", nil); err != nil {
 		t.Fatalf("SendLog error = %v, want nil", err)
 	}
 	if got := hits.Load(); got != 1 {

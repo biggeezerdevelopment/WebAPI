@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -34,7 +35,7 @@ func NewLogClient(logConfig *config.APILogRemote) *LogClient {
 
 	client := &http.Client{
 		Transport: tr,
-		Timeout:   30 * time.Second, // Consider making timeout configurable
+		Timeout:   time.Duration(logConfig.TimeoutSeconds()) * time.Second,
 	}
 
 	return &LogClient{
@@ -83,13 +84,16 @@ func EncodeLogPayload(agentID, agentName, source string, timestamp int64, apiRes
 	})
 }
 
-func (c *LogClient) SendLog(agentID, agentName, source string, apiResults interface{}) error {
+// SendLog posts one record. It stops when ctx is canceled or its deadline
+// passes.
+func (c *LogClient) SendLog(ctx context.Context, agentID, agentName, source string, apiResults interface{}) error {
 	jsonData, err := EncodeLogPayload(agentID, agentName, source, time.Now().Unix(), apiResults)
 	if err != nil {
 		return fmt.Errorf("error marshaling log payload: %v", err)
 	}
 
-	req, err := http.NewRequest(
+	req, err := http.NewRequestWithContext(
+		ctx,
 		strings.ToUpper(c.config.APIMethod),
 		c.config.APIURL,
 		bytes.NewBuffer(jsonData),

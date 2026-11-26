@@ -88,6 +88,7 @@ func (w *WebAPI) UnmarshalYAML(node *yaml.Node) error {
 		APIPassword    yaml.Node `yaml:"api_password"`
 		APIPasswordEnv yaml.Node `yaml:"api_password_env"`
 		Collector      yaml.Node `yaml:"collector"`
+		SkipVerify     yaml.Node `yaml:"skip_verify"`
 	}
 	if err := node.Decode(&raw); err != nil {
 		return err
@@ -97,6 +98,7 @@ func (w *WebAPI) UnmarshalYAML(node *yaml.Node) error {
 	w.apiKeyEnvSet = raw.APIKeyEnv.Kind != 0
 	w.apiPasswordSet = raw.APIPassword.Kind != 0
 	w.apiPasswordEnvSet = raw.APIPasswordEnv.Kind != 0
+	w.skipVerifySet = raw.SkipVerify.Kind != 0
 	if raw.Collector.Kind != 0 && w.Collector == nil {
 		w.Collector = &Collector{}
 	}

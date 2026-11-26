@@ -126,7 +126,7 @@ func buildWithSource(t *testing.T, cfg *config.WebAPI, src Source, dir string, o
 	t.Helper()
 	c, err := newCollectorWithSource(Options{
 		Agent: config.JarvisAgent{ID: "id", Name: "agent"}, Source: cfg, StateDir: dir,
-		Fetcher: api.NewClient(cfg), Outputs: []output.NamedOutput{{Name: "o", Output: out}},
+		Fetcher: testClient(t, cfg), Outputs: []output.NamedOutput{{Name: "o", Output: out}},
 	}, src, func() time.Time { return testNow })
 	if err != nil {
 		t.Fatal(err)
