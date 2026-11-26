@@ -205,3 +205,33 @@ func TestPollFailureKeepsUnhealthyUntilSucceeded(t *testing.T) {
 		t.Fatal("must recover after a later successful poll")
 	}
 }
+
+func TestDuplicateNamesGetDistinctSources(t *testing.T) {
+	cfg := &config.Config{
+		LogOutputs: []config.LogOutput{{Name: "hook", Enabled: true}},
+		WebAPI: []config.WebAPI{
+			{Enabled: true, Name: "x"},
+			{Enabled: false, Name: "off"},
+			{Enabled: true, Name: "x"},
+		},
+	}
+	reg := newRegistry(cfg, (&fakeClock{t: start}).now)
+	a, b := reg.SourceAt(0), reg.SourceAt(2)
+	if a == nil || b == nil || a == b {
+		t.Fatalf("SourceAt(0)=%p SourceAt(2)=%p", a, b)
+	}
+	if reg.SourceAt(1) != nil || reg.SourceAt(3) != nil || reg.SourceAt(-1) != nil {
+		t.Fatal("disabled or out-of-range index must be nil")
+	}
+	b.PollFailed(errors.New("only b"))
+	hb := reg.Snapshot()
+	if len(hb.Sources) != 2 {
+		t.Fatalf("sources = %d", len(hb.Sources))
+	}
+	if hb.Sources[0].LastError != nil || hb.Sources[0].ErrorsSinceLast != 0 {
+		t.Fatalf("first entry polluted: %+v", hb.Sources[0])
+	}
+	if hb.Sources[1].LastError == nil || *hb.Sources[1].LastError != "only b" {
+		t.Fatalf("second entry = %+v", hb.Sources[1])
+	}
+}

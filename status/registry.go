@@ -25,6 +25,7 @@ type Registry struct {
 	interval int
 	sources  []*Source
 	byName   map[string]*Source
+	byIndex  map[int]*Source
 }
 
 // Source records one webapi entry's outcomes. Its methods are safe for
@@ -68,6 +69,7 @@ func newRegistry(cfg *config.Config, now func() time.Time) *Registry {
 		started:  now(),
 		interval: cfg.Heartbeat.IntervalSeconds(),
 		byName:   make(map[string]*Source),
+		byIndex:  make(map[int]*Source),
 	}
 	for i := range cfg.WebAPI {
 		entry := &cfg.WebAPI[i]
@@ -86,13 +88,22 @@ func newRegistry(cfg *config.Config, now func() time.Time) *Registry {
 		}
 		r.sources = append(r.sources, s)
 		r.byName[entry.Name] = s
+		r.byIndex[i] = s
 	}
 	return r
 }
 
-// Source returns the named enabled source, or nil.
+// Source returns the enabled source named name, or nil. Config does not
+// require webapi names to be unique, so when several enabled entries share a
+// name it returns the last one; use SourceAt to address an entry exactly.
 func (r *Registry) Source(name string) *Source {
 	return r.byName[name]
+}
+
+// SourceAt returns the source for cfg.WebAPI[i], or nil if that entry is
+// disabled or i is out of range.
+func (r *Registry) SourceAt(i int) *Source {
+	return r.byIndex[i]
 }
 
 func (s *Source) update(fn func(now time.Time)) {

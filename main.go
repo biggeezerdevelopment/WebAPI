@@ -90,7 +90,7 @@ func main() {
 			StateDir: cfg.StateDir,
 			Fetcher:  api.NewClient(apiCfg),
 			Outputs:  routes,
-			Status:   reg.Source(apiCfg.Name),
+			Status:   reg.SourceAt(i),
 		})
 		if err != nil {
 			log.Fatalf("Failed to start collector %q: %v", apiCfg.Name, err)
@@ -128,7 +128,7 @@ func main() {
 		}
 
 		client := api.NewClient(apiCfg)
-		src := reg.Source(apiCfg.Name)
+		src := reg.SourceAt(i)
 		dispatcher, err := router.ObservedDispatcher(apiCfg, src)
 		if err != nil {
 			log.Fatalf("Failed to route log outputs: %v", err)
