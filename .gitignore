@@ -1,0 +1,4 @@
+# Secrets: credentials are passed as environment variables; keep files that hold them out of Git
+.env
+.env.*
+*.env
