@@ -38,6 +38,17 @@ type Output interface {
 	Close() error
 }
 
+// ErrQueueFull reports a record dropped because an output's queue was full.
+var ErrQueueFull = errors.New("queue is full")
+
+// DeliveryObserver learns the outcome of each delivery by output name. It must
+// be safe for concurrent use. Shutdown drops and canceled sends are not
+// reported.
+type DeliveryObserver interface {
+	Delivered(output string)
+	DeliveryFailed(output string, err error)
+}
+
 // retrying retries an Output with exponential backoff. The whole sequence for
 // a record, including backoff, is bounded by timeout and the caller's context.
 type retrying struct {
@@ -106,6 +117,7 @@ type Dispatcher struct {
 	source  string
 	targets []target
 	queues  []chan queuedRecord
+	obs     DeliveryObserver
 
 	mu     sync.RWMutex
 	closed bool
@@ -113,7 +125,12 @@ type Dispatcher struct {
 }
 
 func newDispatcher(source string, targets []target, queueSize int) *Dispatcher {
-	d := &Dispatcher{source: source, targets: targets}
+	return newObservedDispatcher(source, targets, queueSize, nil)
+}
+
+// newObservedDispatcher is newDispatcher with an optional observer.
+func newObservedDispatcher(source string, targets []target, queueSize int, obs DeliveryObserver) *Dispatcher {
+	d := &Dispatcher{source: source, targets: targets, obs: obs}
 	if len(targets) < 2 {
 		return d
 	}
@@ -153,13 +170,25 @@ func (d *Dispatcher) Deliver(ctx context.Context, rec Record) {
 		case queue <- queuedRecord{ctx: ctx, rec: rec}:
 		default:
 			log.Printf("Dropping record from source %q for output %q: queue is full", d.source, d.targets[i].name)
+			if d.obs != nil {
+				d.obs.DeliveryFailed(d.targets[i].name, ErrQueueFull)
+			}
 		}
 	}
 }
 
 func (d *Dispatcher) send(ctx context.Context, t target, rec Record) {
-	if err := t.out.Send(ctx, rec); err != nil {
+	err := t.out.Send(ctx, rec)
+	if err != nil {
 		log.Printf("Error delivering record from source %q to output %q: %v", d.source, t.name, err)
+	}
+	if d.obs == nil || ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		d.obs.DeliveryFailed(t.name, err)
+	} else {
+		d.obs.Delivered(t.name)
 	}
 }
 
@@ -221,17 +250,37 @@ func newConfiguredOutput(entry *config.LogOutput) (Output, error) {
 
 // Dispatcher returns a new dispatcher for the source's configured routes.
 func (r *Router) Dispatcher(source *config.WebAPI) (*Dispatcher, error) {
+	return r.ObservedDispatcher(source, nil)
+}
+
+// ObservedDispatcher is Dispatcher with an observer told each delivery's
+// outcome. obs may be nil.
+func (r *Router) ObservedDispatcher(source *config.WebAPI, obs DeliveryObserver) (*Dispatcher, error) {
 	routes, err := r.namedOutputs(source)
 	if err != nil {
 		return nil, err
 	}
+	return r.dispatcherFor(source.Name, routes, obs), nil
+}
+
+// HeartbeatDispatcher returns a dispatcher that sends heartbeat records named
+// name to the given outputs.
+func (r *Router) HeartbeatDispatcher(name string, outputs []string) (*Dispatcher, error) {
+	routes, err := r.outputsNamed("heartbeat", outputs)
+	if err != nil {
+		return nil, err
+	}
+	return r.dispatcherFor(name, routes, nil), nil
+}
+
+func (r *Router) dispatcherFor(source string, routes []NamedOutput, obs DeliveryObserver) *Dispatcher {
 	targets := make([]target, 0, len(routes))
 	for _, route := range routes {
 		targets = append(targets, target{name: route.Name, out: route.Output})
 	}
-	d := newDispatcher(source.Name, targets, laneQueueSize)
+	d := newObservedDispatcher(source, targets, laneQueueSize, obs)
 	r.dispatchers = append(r.dispatchers, d)
-	return d, nil
+	return d
 }
 
 // NamedOutput is an output with the name it is routed by.
@@ -258,12 +307,16 @@ func (r *Router) Routes(source *config.WebAPI) ([]NamedOutput, error) {
 }
 
 func (r *Router) namedOutputs(source *config.WebAPI) ([]NamedOutput, error) {
-	names := r.cfg.RoutesFor(source)
+	return r.outputsNamed(fmt.Sprintf("webapi (name %q)", source.Name), r.cfg.RoutesFor(source))
+}
+
+// outputsNamed resolves output names. label prefixes errors.
+func (r *Router) outputsNamed(label string, names []string) ([]NamedOutput, error) {
 	routes := make([]NamedOutput, 0, len(names))
 	for _, name := range names {
 		out, ok := r.outputs[name]
 		if !ok {
-			return nil, fmt.Errorf("webapi (name %q): output %q is not available", source.Name, name)
+			return nil, fmt.Errorf("%s: output %q is not available", label, name)
 		}
 		routes = append(routes, NamedOutput{Name: name, Output: out})
 	}
