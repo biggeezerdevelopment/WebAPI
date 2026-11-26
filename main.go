@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -100,105 +103,189 @@ func shutdown(wait func(), closeFn func() error, timeout time.Duration) error {
 	}
 }
 
+// options are the command-line settings.
+type options struct {
+	configPath  string
+	checkConfig bool
+}
+
+// parseFlags reads the command line. Usage and errors go to stderr.
+func parseFlags(args []string, stderr io.Writer) (options, error) {
+	var opts options
+	fs := flag.NewFlagSet("webapi-agent", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.StringVar(&opts.configPath, "config", "config.yml", "path to the configuration file")
+	fs.BoolVar(&opts.checkConfig, "check-config", false, "validate the configuration, build outputs and collectors, and exit without polling or writing state")
+	if err := fs.Parse(args); err != nil {
+		return options{}, err
+	}
+	if fs.NArg() > 0 {
+		err := fmt.Errorf("unexpected argument %q", fs.Arg(0))
+		fmt.Fprintln(stderr, err)
+		fs.Usage()
+		return options{}, err
+	}
+	return opts, nil
+}
+
 func main() {
-	// Load configuration
-	cfg, err := config.LoadConfig("config.yml")
-	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
-	}
-	for _, warning := range cfg.OutputWarnings() {
-		log.Printf("WARNING: %s", warning)
-	}
-
-	router, err := output.NewRouter(cfg)
-	if err != nil {
-		log.Fatalf("Failed to create log outputs: %v", err)
-	}
-
 	// SIGINT is also what NSSM sends on Windows (Ctrl+C); SIGTERM is systemd's.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop() // A second signal now ends the process at once.
+	}()
+	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	stop()
+	os.Exit(code)
+}
+
+// run is the whole agent: it returns the process exit code. 2 is a usage
+// error and 1 any other failure.
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	opts, err := parseFlags(args, stderr)
+	if err != nil {
+		return 2
+	}
+	logger := log.New(stderr, "", log.LstdFlags)
+
+	cfg, err := config.LoadConfig(opts.configPath)
+	if err != nil {
+		logger.Printf("Failed to load config: %v", err)
+		return 1
+	}
+	for _, warning := range cfg.OutputWarnings() {
+		logger.Printf("WARNING: %s", warning)
+	}
+
+	a, err := build(cfg, opts.checkConfig)
+	if err != nil {
+		logger.Print(err)
+		return 1
+	}
+	if opts.checkConfig {
+		if err := a.router.Close(); err != nil {
+			logger.Printf("Closing outputs: %v", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "%s: configuration OK\n", opts.configPath)
+		return 0
+	}
+
 	var wg sync.WaitGroup
-	reg := status.NewRegistry(cfg)
-
-	// Build every collector first, so that bad state stops startup before any
-	// source has begun polling.
-	collectors := make(map[int]*collector.Collector)
-	for i := range cfg.WebAPI {
-		apiCfg := &cfg.WebAPI[i]
-		if !apiCfg.Enabled || apiCfg.Collector == nil {
-			continue
-		}
-		routes, err := router.Routes(apiCfg)
-		if err != nil {
-			log.Fatalf("Failed to route log outputs: %v", err)
-		}
-		c, err := collector.New(collector.Options{
-			Agent:    cfg.JarvisAgent,
-			Source:   apiCfg,
-			StateDir: cfg.StateDir,
-			Fetcher:  api.NewClient(apiCfg),
-			Outputs:  routes,
-			Status:   reg.SourceAt(i),
-		})
-		if err != nil {
-			log.Fatalf("Failed to start collector %q: %v", apiCfg.Name, err)
-		}
-		collectors[i] = c
+	a.start(ctx, &wg)
+	<-ctx.Done()
+	logger.Printf("Shutting down: waiting up to %s for sources and outputs", shutdownTimeout)
+	if err := shutdown(wg.Wait, a.router.Close, shutdownTimeout); err != nil {
+		logger.Printf("Shutdown: %v", err)
+		return 1
 	}
+	logger.Printf("Shutdown complete")
+	return 0
+}
 
-	if cfg.Heartbeat.Enabled {
-		hb, err := router.HeartbeatDispatcher(cfg.Heartbeat.SourceName(), cfg.Heartbeat.Outputs)
-		if err != nil {
-			log.Fatalf("Failed to route heartbeat: %v", err)
-		}
-		ticker := time.NewTicker(time.Duration(cfg.Heartbeat.IntervalSeconds()) * time.Second)
-		defer ticker.Stop()
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			heartbeat.Run(ctx, reg, hb, cfg.JarvisAgent, cfg.Heartbeat.SourceName(), ticker.C)
-		}()
+// agent holds everything built from a configuration before polling starts.
+type agent struct {
+	cfg        *config.Config
+	router     *output.Router
+	reg        *status.Registry
+	collectors []*collector.Collector
+	plain      []plainSource
+	heartbeat  *output.Dispatcher
+}
+
+// plainSource is an enabled source without a collector.
+type plainSource struct {
+	cfg        *config.WebAPI
+	client     *api.Client
+	dispatcher *output.Dispatcher
+	status     pollStatus
+}
+
+// build creates the outputs, collectors, sources and heartbeat. Collectors
+// are built before anything polls, so bad state stops startup. With readOnly
+// no state file is written. On error the router is closed.
+func build(cfg *config.Config, readOnly bool) (a *agent, err error) {
+	router, err := output.NewRouter(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to create log outputs: %w", err)
 	}
+	defer func() {
+		if err != nil {
+			_ = router.Close()
+		}
+	}()
+	a = &agent{cfg: cfg, router: router, reg: status.NewRegistry(cfg)}
 
-	// Initialize API clients for each enabled WebAPI
 	for i := range cfg.WebAPI {
 		apiCfg := &cfg.WebAPI[i]
 		if !apiCfg.Enabled {
 			continue
 		}
-		if c, ok := collectors[i]; ok {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				c.Run(ctx)
-			}()
+		client := api.NewClient(apiCfg)
+		src := a.reg.SourceAt(i)
+		if apiCfg.Collector == nil {
+			dispatcher, err := router.ObservedDispatcher(apiCfg, src)
+			if err != nil {
+				return nil, fmt.Errorf("Failed to route log outputs: %w", err)
+			}
+			a.plain = append(a.plain, plainSource{cfg: apiCfg, client: client, dispatcher: dispatcher, status: src})
 			continue
 		}
-
-		client := api.NewClient(apiCfg)
-		src := reg.SourceAt(i)
-		dispatcher, err := router.ObservedDispatcher(apiCfg, src)
+		routes, err := router.Routes(apiCfg)
 		if err != nil {
-			log.Fatalf("Failed to route log outputs: %v", err)
+			return nil, fmt.Errorf("Failed to route log outputs: %w", err)
 		}
+		c, err := collector.New(collector.Options{
+			Agent:    cfg.JarvisAgent,
+			Source:   apiCfg,
+			StateDir: cfg.StateDir,
+			Fetcher:  client,
+			Outputs:  routes,
+			Status:   src,
+			ReadOnly: readOnly,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("Failed to start collector %q: %w", apiCfg.Name, err)
+		}
+		a.collectors = append(a.collectors, c)
+	}
 
+	if cfg.Heartbeat.Enabled {
+		a.heartbeat, err = router.HeartbeatDispatcher(cfg.Heartbeat.SourceName(), cfg.Heartbeat.Outputs)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to route heartbeat: %w", err)
+		}
+	}
+	return a, nil
+}
+
+// start launches the heartbeat and every source. Each goroutine is added to
+// wg and returns once ctx is canceled.
+func (a *agent) start(ctx context.Context, wg *sync.WaitGroup) {
+	if a.heartbeat != nil {
+		ticker := time.NewTicker(time.Duration(a.cfg.Heartbeat.IntervalSeconds()) * time.Second)
 		wg.Add(1)
-		// Start a goroutine for each API client
 		go func() {
 			defer wg.Done()
-			pollLoop(ctx, time.Duration(apiCfg.SleepTime)*time.Second, func() {
-				pollOnce(ctx, cfg.JarvisAgent, apiCfg.Name, client, dispatcher, src)
+			defer ticker.Stop()
+			heartbeat.Run(ctx, a.reg, a.heartbeat, a.cfg.JarvisAgent, a.cfg.Heartbeat.SourceName(), ticker.C)
+		}()
+	}
+	for _, c := range a.collectors {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.Run(ctx)
+		}()
+	}
+	for _, p := range a.plain {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pollLoop(ctx, time.Duration(p.cfg.SleepTime)*time.Second, func() {
+				pollOnce(ctx, a.cfg.JarvisAgent, p.cfg.Name, p.client, p.dispatcher, p.status)
 			})
 		}()
 	}
-
-	<-ctx.Done()
-	stop() // A second signal now ends the process at once.
-	log.Printf("Shutting down: waiting up to %s for sources and outputs", shutdownTimeout)
-	if err := shutdown(wg.Wait, router.Close, shutdownTimeout); err != nil {
-		log.Printf("Shutdown: %v", err)
-		os.Exit(1)
-	}
-	log.Printf("Shutdown complete")
 }
