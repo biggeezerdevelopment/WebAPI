@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"webapi/api"
 	"webapi/config"
 	"webapi/output"
 )
@@ -222,7 +221,7 @@ func buildJira(t *testing.T, j *jiraServer, dir, limit string, out *numOutput) *
 	}
 	c, err := newCollector(Options{
 		Agent: config.JarvisAgent{ID: "id", Name: "agent"}, Source: source, StateDir: dir,
-		Fetcher: api.NewClient(source), Outputs: []output.NamedOutput{{Name: "o", Output: out}},
+		Fetcher: testClient(t, source), Outputs: []output.NamedOutput{{Name: "o", Output: out}},
 	}, func() time.Time { return testNow })
 	if err != nil {
 		t.Fatal(err)

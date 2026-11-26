@@ -222,7 +222,10 @@ func build(cfg *config.Config, readOnly bool) (a *agent, err error) {
 		if !apiCfg.Enabled {
 			continue
 		}
-		client := api.NewClient(apiCfg)
+		client, err := api.NewClient(apiCfg)
+		if err != nil {
+			return nil, fmt.Errorf("webapi[%d] (name %q): %w", i, apiCfg.Name, err)
+		}
 		src := a.reg.SourceAt(i)
 		if apiCfg.Collector == nil {
 			dispatcher, err := router.ObservedDispatcher(apiCfg, src)

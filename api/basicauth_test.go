@@ -19,7 +19,7 @@ func TestBasicAuthPasswordFromEnv(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(&config.WebAPI{
+	client := newTestClient(t, &config.WebAPI{
 		Endpoint:       server.URL,
 		Method:         "get",
 		Timeout:        5,

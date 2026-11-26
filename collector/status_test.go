@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"webapi/api"
 	"webapi/config"
 	"webapi/output"
 )
@@ -56,7 +55,7 @@ func buildWithStatus(t *testing.T, cfg *config.WebAPI, src Source, out output.Ou
 	t.Helper()
 	c, err := newCollectorWithSource(Options{
 		Agent: config.JarvisAgent{ID: "id", Name: "agent"}, Source: cfg, StateDir: t.TempDir(),
-		Fetcher: api.NewClient(cfg), Outputs: []output.NamedOutput{{Name: "o", Output: out}}, Status: st,
+		Fetcher: testClient(t, cfg), Outputs: []output.NamedOutput{{Name: "o", Output: out}}, Status: st,
 	}, src, func() time.Time { return testNow })
 	if err != nil {
 		t.Fatal(err)

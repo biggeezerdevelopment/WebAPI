@@ -152,7 +152,7 @@ func build(t *testing.T, a *auditServer, dir string, outs map[string]*fakeOutput
 	}
 	c, err := newCollector(Options{
 		Agent: config.JarvisAgent{ID: "id", Name: "agent"}, Source: source,
-		StateDir: dir, Fetcher: api.NewClient(source), Outputs: routes,
+		StateDir: dir, Fetcher: testClient(t, source), Outputs: routes,
 	}, func() time.Time { return testNow })
 	if err != nil {
 		t.Fatal(err)

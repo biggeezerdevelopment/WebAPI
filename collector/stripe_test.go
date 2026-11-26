@@ -233,7 +233,7 @@ func buildStripe(t *testing.T, s *stripeServer, dir string, params map[string]st
 	}
 	c, err := newCollector(Options{
 		Agent: config.JarvisAgent{ID: "id", Name: "agent"}, Source: source, StateDir: dir,
-		Fetcher: api.NewClient(source), Outputs: []output.NamedOutput{{Name: "o", Output: out}},
+		Fetcher: testClient(t, source), Outputs: []output.NamedOutput{{Name: "o", Output: out}},
 	}, now)
 	if err != nil {
 		t.Fatal(err)

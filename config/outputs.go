@@ -273,8 +273,8 @@ func (c *Config) RoutesFor(w *WebAPI) []string {
 	return w.Outputs
 }
 
-// OutputWarnings returns startup warnings for insecure enabled outputs. They
-// name the output and never include its URL.
+// OutputWarnings returns startup warnings for insecure enabled outputs and
+// sources. They name the entry and never include its URL.
 func (c *Config) OutputWarnings() []string {
 	var warnings []string
 	for i := range c.LogOutputs {
@@ -293,6 +293,7 @@ func (c *Config) OutputWarnings() []string {
 			warnings = append(warnings, fmt.Sprintf("log output %q has TLS verification disabled (skip_verify: true)", entry.Name))
 		}
 	}
+	warnings = append(warnings, c.sourceWarnings()...)
 	warnings = append(warnings, c.collectorWarnings()...)
 	return append(warnings, c.heartbeatWarnings()...)
 }

@@ -15,7 +15,7 @@ func TestNewReadOnlyDoesNotSaveInitialCheckpoints(t *testing.T) {
 	dir := t.TempDir()
 	_, err := newCollectorWithSource(Options{
 		Agent: config.JarvisAgent{ID: "id"}, Source: cfg, StateDir: dir,
-		Fetcher: api.NewClient(cfg), Outputs: []output.NamedOutput{{Name: "o", Output: &fakeOutput{}}},
+		Fetcher: testClient(t, cfg), Outputs: []output.NamedOutput{{Name: "o", Output: &fakeOutput{}}},
 		ReadOnly: true,
 	}, &cursorSource{endpoint: cfg.Endpoint}, func() time.Time { return testNow })
 	if err != nil {
@@ -24,4 +24,14 @@ func TestNewReadOnlyDoesNotSaveInitialCheckpoints(t *testing.T) {
 	if _, err := os.Stat(statePath(dir, cfg.Name)); !os.IsNotExist(err) {
 		t.Fatalf("state file exists after read-only build (stat err = %v)", err)
 	}
+}
+
+// testClient builds a source client and fails the test on a TLS setup error.
+func testClient(t *testing.T, cfg *config.WebAPI) *api.Client {
+	t.Helper()
+	c, err := api.NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }

@@ -41,7 +41,7 @@ func TestSendRequestBody(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewClient(&config.WebAPI{
+			client := newTestClient(t, &config.WebAPI{
 				Endpoint: server.URL,
 				Method:   "post",
 				Timeout:  5,
@@ -71,5 +71,9 @@ func TestSendRequestBody(t *testing.T) {
 // newTestClient builds a client and fails the test on a TLS setup error.
 func newTestClient(t *testing.T, cfg *config.WebAPI) *Client {
 	t.Helper()
-	return NewClient(cfg)
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }

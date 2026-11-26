@@ -113,8 +113,9 @@ webapi:
 	if got := cfg.RoutesFor(&cfg.WebAPI[0]); !reflect.DeepEqual(got, []string{"apilogremote"}) {
 		t.Errorf("routes = %v", got)
 	}
-	if w := cfg.OutputWarnings(); len(w) != 0 {
-		t.Errorf("legacy config produced warnings: %v", w)
+	// The only warning is for the plaintext http source itself.
+	if w := cfg.OutputWarnings(); !reflect.DeepEqual(w, []string{`source "legacy" uses plaintext http`}) {
+		t.Errorf("legacy config warnings = %v", w)
 	}
 
 	cfg.APILogRemote.Enabled = false
