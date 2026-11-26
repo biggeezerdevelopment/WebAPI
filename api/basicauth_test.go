@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
@@ -28,7 +29,7 @@ func TestBasicAuthPasswordFromEnv(t *testing.T) {
 	})
 	// The password resolves once, in NewClient, not per request.
 	t.Setenv("TEST_JIRA_TOKEN", "changed-later")
-	if _, err := client.SendRequest(); err != nil {
+	if _, err := client.SendRequest(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("svc-audit@example.com:env-token-value"))

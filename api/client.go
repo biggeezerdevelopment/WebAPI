@@ -59,7 +59,8 @@ func NewClient(apiConfig *config.WebAPI) *Client {
 	}
 }
 
-func (c *Client) SendRequest() ([]byte, error) {
+// SendRequest performs one poll. It stops when ctx is canceled.
+func (c *Client) SendRequest(ctx context.Context) ([]byte, error) {
 	payload, err := c.config.Body.Payload()
 	if err != nil {
 		return nil, fmt.Errorf("error encoding body: %v", err)
@@ -71,7 +72,8 @@ func (c *Client) SendRequest() ([]byte, error) {
 		body = bytes.NewReader(payload)
 	}
 
-	req, err := http.NewRequest(
+	req, err := http.NewRequestWithContext(
+		ctx,
 		strings.ToUpper(c.config.Method),
 		c.config.Endpoint,
 		body,
@@ -98,6 +100,9 @@ func (c *Client) SendRequest() ([]byte, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil, fmt.Errorf("request canceled: %w", context.Canceled)
+		}
 		return nil, fmt.Errorf("error sending request: %v", err)
 	}
 	defer resp.Body.Close()

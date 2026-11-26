@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"webapi/api"
@@ -14,9 +18,16 @@ import (
 	"webapi/status"
 )
 
+// shutdownTimeout bounds how long the agent waits, after a stop signal, for
+// sources and outputs to finish. A hung request cannot block exit past it.
+const shutdownTimeout = 30 * time.Second
+
+// errShutdownTimeout reports that shutdown did not finish in time.
+var errShutdownTimeout = errors.New("shutdown did not finish in time")
+
 // fetcher performs one poll of a source.
 type fetcher interface {
-	SendRequest() ([]byte, error)
+	SendRequest(ctx context.Context) ([]byte, error)
 }
 
 // deliverer hands a polled record to the source's outputs.
@@ -33,10 +44,14 @@ type pollStatus interface {
 }
 
 // pollOnce fetches once and forwards the result. A failed poll is still
-// forwarded, with nil data, so that receivers see a null result.
+// forwarded, with nil data, so that receivers see a null result. A poll ended
+// by shutdown is neither reported nor forwarded.
 func pollOnce(ctx context.Context, agent config.JarvisAgent, name string, f fetcher, d deliverer, st pollStatus) {
 	st.PollStarted()
-	body, err := f.SendRequest()
+	body, err := f.SendRequest(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 	if err != nil {
 		log.Printf("Error sending request to %s: %v", name, err)
 		st.PollFailed(err)
@@ -50,6 +65,39 @@ func pollOnce(ctx context.Context, agent config.JarvisAgent, name string, f fetc
 		Timestamp: time.Now(),
 		Data:      body,
 	})
+}
+
+// pollLoop calls poll, then waits interval, until ctx is canceled.
+func pollLoop(ctx context.Context, interval time.Duration, poll func()) {
+	for {
+		poll()
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+// shutdown runs wait and then closeFn, giving up after timeout. On a timeout
+// closeFn may still be running; the caller exits anyway. Checkpoints are
+// replaced atomically, so exiting during a save leaves the old or new state.
+func shutdown(wait func(), closeFn func() error, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() {
+		wait()
+		done <- closeFn()
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return errShutdownTimeout
+	}
 }
 
 func main() {
@@ -66,9 +114,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create log outputs: %v", err)
 	}
-	defer router.Close()
 
-	ctx := context.Background()
+	// SIGINT is also what NSSM sends on Windows (Ctrl+C); SIGTERM is systemd's.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	var wg sync.WaitGroup
 	reg := status.NewRegistry(cfg)
 
@@ -138,13 +187,18 @@ func main() {
 		// Start a goroutine for each API client
 		go func() {
 			defer wg.Done()
-			for {
+			pollLoop(ctx, time.Duration(apiCfg.SleepTime)*time.Second, func() {
 				pollOnce(ctx, cfg.JarvisAgent, apiCfg.Name, client, dispatcher, src)
-				time.Sleep(time.Duration(apiCfg.SleepTime) * time.Second)
-			}
+			})
 		}()
 	}
 
-	// Wait for all goroutines to complete (they won't in this case, but it's good practice)
-	wg.Wait()
+	<-ctx.Done()
+	stop() // A second signal now ends the process at once.
+	log.Printf("Shutting down: waiting up to %s for sources and outputs", shutdownTimeout)
+	if err := shutdown(wg.Wait, router.Close, shutdownTimeout); err != nil {
+		log.Printf("Shutdown: %v", err)
+		os.Exit(1)
+	}
+	log.Printf("Shutdown complete")
 }

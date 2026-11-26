@@ -14,7 +14,7 @@ type stubFetcher struct {
 	err  error
 }
 
-func (s stubFetcher) SendRequest() ([]byte, error) { return s.body, s.err }
+func (s stubFetcher) SendRequest(context.Context) ([]byte, error) { return s.body, s.err }
 
 type captureDeliverer struct {
 	records []output.Record

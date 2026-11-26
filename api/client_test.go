@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -47,7 +48,7 @@ func TestSendRequestBody(t *testing.T) {
 				Body:     body,
 			})
 
-			resp, err := client.SendRequest()
+			resp, err := client.SendRequest(context.Background())
 			if err != nil {
 				t.Fatalf("SendRequest returned error: %v", err)
 			}
@@ -65,4 +66,10 @@ func TestSendRequestBody(t *testing.T) {
 			}
 		})
 	}
+}
+
+// newTestClient builds a client and fails the test on a TLS setup error.
+func newTestClient(t *testing.T, cfg *config.WebAPI) *Client {
+	t.Helper()
+	return NewClient(cfg)
 }
