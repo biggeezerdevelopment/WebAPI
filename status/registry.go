@@ -209,7 +209,9 @@ func (n NullableTime) MarshalJSON() ([]byte, error) {
 }
 
 // Snapshot copies every source's status and resets the counts since the last
-// snapshot. Last-seen times and errors are kept.
+// snapshot. Last-seen times and errors are kept. The heartbeat is unhealthy
+// when any count since the last snapshot is above zero, or when a source or
+// output has failed more recently than it last succeeded.
 func (r *Registry) Snapshot() Heartbeat {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -239,7 +241,7 @@ func (r *Registry) Snapshot() Heartbeat {
 			ct := s.collectorType
 			snap.CollectorType = &ct
 		}
-		if s.errors > 0 {
+		if s.errors > 0 || (!s.lastErrorAt.IsZero() && s.lastErrorAt.After(s.lastSuccess)) {
 			hb.Healthy = false
 		}
 		s.errors = 0
@@ -258,7 +260,7 @@ func (r *Registry) Snapshot() Heartbeat {
 				}
 				out.Checkpoint = cp
 			}
-			if o.failures > 0 {
+			if o.failures > 0 || (!o.lastErrorAt.IsZero() && o.lastErrorAt.After(o.lastDelivery)) {
 				hb.Healthy = false
 			}
 			o.failures = 0

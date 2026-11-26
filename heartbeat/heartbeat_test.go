@@ -80,7 +80,7 @@ func TestRunSendsAtStartAndOnEveryTick(t *testing.T) {
 	ticks <- time.Now()
 	second := decode(t, receive(t, d.records).Data)
 	src = second["sources"].([]any)[0].(map[string]any)
-	if second["healthy"] != true || src["errors_since_last"] != float64(0) || src["last_error"] != "boom" {
+	if second["healthy"] != false || src["errors_since_last"] != float64(0) || src["last_error"] != "boom" {
 		t.Fatalf("second = %v", second)
 	}
 

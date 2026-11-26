@@ -165,3 +165,43 @@ func TestConcurrentUpdatesAreCounted(t *testing.T) {
 		t.Fatalf("total errors = %d, want 800", total)
 	}
 }
+
+func TestDeliveryFailureKeepsUnhealthyUntilDelivered(t *testing.T) {
+	clock := &fakeClock{t: start}
+	reg := newRegistry(testConfig(), clock.now)
+	plain := reg.Source("plain")
+
+	clock.t = start.Add(time.Minute)
+	plain.DeliveryFailed("hook", errors.New("down"))
+	if reg.Snapshot().Healthy {
+		t.Fatal("first snapshot must be unhealthy")
+	}
+	if hb := reg.Snapshot(); hb.Healthy || hb.Sources[1].Outputs[0].DeliveryFailuresSinceLast != 0 {
+		t.Fatalf("second snapshot must stay unhealthy with counts reset: %+v", hb)
+	}
+	clock.t = start.Add(2 * time.Minute)
+	plain.Delivered("hook")
+	if !reg.Snapshot().Healthy {
+		t.Fatal("must recover after a later delivery")
+	}
+}
+
+func TestPollFailureKeepsUnhealthyUntilSucceeded(t *testing.T) {
+	clock := &fakeClock{t: start}
+	reg := newRegistry(testConfig(), clock.now)
+	gh := reg.Source("gh")
+
+	clock.t = start.Add(time.Minute)
+	gh.PollFailed(errors.New("boom"))
+	if reg.Snapshot().Healthy {
+		t.Fatal("first snapshot must be unhealthy")
+	}
+	if hb := reg.Snapshot(); hb.Healthy || hb.Sources[0].ErrorsSinceLast != 0 {
+		t.Fatalf("second snapshot must stay unhealthy with counts reset: %+v", hb)
+	}
+	clock.t = start.Add(2 * time.Minute)
+	gh.PollSucceeded()
+	if !reg.Snapshot().Healthy {
+		t.Fatal("must recover after a later successful poll")
+	}
+}
