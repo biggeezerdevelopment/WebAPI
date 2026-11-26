@@ -6,7 +6,8 @@ apilogremote:
     enabled: False
     api_url: "http://localhost:8080/api/v1/logs"
     #api_key: "1234567890"
-    #api_timeout: 30
+    #api_timeout: 30            # Seconds (1-3600), default 30, covering up to 3
+    #                           # retries with exponential backoff of one record
     #skip_verify: False
     #api_auth_type: "apikey"
     #api_username: "admin"
@@ -180,7 +181,15 @@ webapi:
       # Or read the basic-auth password (e.g. an API token) from the
       # environment instead of committing it; do not set both:
       #api_password_env: "JIRA_API_TOKEN"
-      skip_verify: True
+      skip_verify: True          # Shorthand for tls.skip_verify
+      # Or use a tls section, with the same rules as an output's tls. Setting
+      # skip_verify (even False) together with tls is a startup error.
+      #tls:
+      #  ca_file: "/etc/webapi/certs/internal-ca.pem"  # Trust only this bundle
+      #  #cert_file: "/etc/webapi/certs/client.pem"    # Mutual TLS, needs key_file
+      #  #key_file: "/etc/webapi/certs/client-key.pem"
+      #  #server_name: "api.internal"
+      #  #skip_verify: false          # Cannot be combined with ca_file
       sleeptime: 30
       timeout: 30
       params:

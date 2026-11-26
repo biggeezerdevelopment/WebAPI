@@ -6,8 +6,8 @@ This guide covers running `webapi-agent` as a long-lived service on Linux (syste
 
 ### Configuration
 
-- The agent loads `config.yml` from its **current working directory**. No command-line flag selects another path.
-- The service definition must therefore set the working directory to the folder that holds `config.yml`.
+- By default the agent loads `config.yml` from its **current working directory**. `-config <path>` selects another file; a relative path also resolves against the working directory.
+- Without an absolute `-config`, the service definition must set the working directory to the folder that holds `config.yml`.
 - A relative `state_dir` resolves against the working directory. Use an absolute `state_dir` for services.
 
 ### Secrets
@@ -36,8 +36,9 @@ SIEM_WEBHOOK_AUTH
 ### Logging and Shutdown
 
 - The agent writes its logs to stderr.
-- The agent has no signal handling, so a stop request ends the process at once.
-- Stopping the service is still safe, because checkpoints are written atomically (temp file, fsync, rename). At worst, events delivered since the last checkpoint are sent again (at-least-once delivery).
+- On SIGTERM (systemd) or Ctrl+C (NSSM), the agent stops polling and waits up to 30 seconds for in-flight requests and deliveries, then exits. A second signal ends it at once.
+- Give the service manager a stop timeout above 30 seconds. systemd's default of 90 seconds is enough. NSSM needs `AppStopMethodConsole` raised (see Install the Service).
+- A forced stop, or a shutdown that times out, is still safe, because checkpoints are written atomically (temp file, fsync, rename). At worst, events delivered since the last checkpoint are sent again (at-least-once delivery).
 
 **Heartbeat.** If the heartbeat is enabled (see [README.md](README.md#heartbeat)):
 
@@ -164,9 +165,13 @@ For remote liveness, enable the heartbeat described in [README.md](README.md#hea
 
 ```bash
 sudoedit /etc/webapi/webapi.env
+sudo systemd-run --pipe --wait -p User=webapi -p WorkingDirectory=/etc/webapi \
+  -p EnvironmentFile=/etc/webapi/webapi.env /opt/webapi/webapi-agent -check-config
 sudo systemctl restart webapi
 journalctl -u webapi -n 50
 ```
+
+The `systemd-run` line checks the config with the service's user, directory and variables. Restart only after it prints `configuration OK`.
 
 Revoke the old key at the provider only after the agent has polled successfully with the new one.
 
@@ -226,7 +231,10 @@ state_dir: 'C:\ProgramData\WebAPI\state'
    ```powershell
    nssm install webapi "C:\Program Files\WebAPI\webapi-agent.exe"
    nssm set webapi AppDirectory "C:\ProgramData\WebAPI"
+   nssm set webapi AppStopMethodConsole 35000
    ```
+
+   NSSM stops the agent with Ctrl+C and by default waits only 1500 ms before forcing it. 35000 ms lets the agent's 30-second shutdown finish.
 
 2. Capture the agent's output. The agent logs to stderr, so send both streams to one file, and rotate it at 10 MB while the service runs:
 
@@ -407,6 +415,8 @@ headers:
 - [ ] Every credential uses `api_key_env`, `api_password_env` or `value_env`.
 - [ ] The service's working directory is the folder that holds `config.yml`.
 - [ ] `state_dir` is an absolute path that the service account can write to.
+- [ ] `webapi-agent -check-config`, run with the service's environment, prints `configuration OK` before each restart.
+- [ ] The stop timeout is above 30 seconds (systemd `TimeoutStopSec`, default 90, or NSSM `AppStopMethodConsole`).
 - [ ] Linux: `webapi.env` is `root:root 0600`, `config.yml` is `root:webapi 0640`, and the state directory is `webapi:webapi 0700`.
 - [ ] Windows: `C:\ProgramData\WebAPI` has no inherited permissions, and `svc-webapi` can modify only `state` and `logs`.
 - [ ] Windows: the `Services\webapi\Parameters` registry key grants access only to SYSTEM, Administrators and `svc-webapi`.
