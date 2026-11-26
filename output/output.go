@@ -86,14 +86,14 @@ func (r *retrying) Send(ctx context.Context, rec Record) error {
 	}
 }
 
-// logRemoteOutput adapts the legacy apilogremote client. It is deliberately
-// not retried so that existing configurations behave as they always have.
+// logRemoteOutput adapts the legacy apilogremote client. The router wraps it
+// in retrying, like the named outputs, bounded by api_timeout.
 type logRemoteOutput struct {
 	client *api.LogClient
 }
 
-func (o *logRemoteOutput) Send(_ context.Context, rec Record) error {
-	return o.client.SendLog(rec.AgentID, rec.AgentName, rec.Source, rec.Data)
+func (o *logRemoteOutput) Send(ctx context.Context, rec Record) error {
+	return o.client.SendLog(ctx, rec.AgentID, rec.AgentName, rec.Source, rec.Data)
 }
 
 func (o *logRemoteOutput) Close() error { return nil }
@@ -222,8 +222,9 @@ func NewRouter(cfg *config.Config) (*Router, error) {
 	r := &Router{cfg: cfg, outputs: make(map[string]Output)}
 	if cfg.APILogRemote.Enabled {
 		client := api.NewLogClient(&cfg.APILogRemote)
-		r.outputs[config.APILogRemoteOutputName] = &logRemoteOutput{client: client}
-		r.confirmedLogRemote = &logRemoteOutput{client: client.WithoutRedirects()}
+		timeout := time.Duration(cfg.APILogRemote.TimeoutSeconds()) * time.Second
+		r.outputs[config.APILogRemoteOutputName] = newRetrying(&logRemoteOutput{client: client}, timeout)
+		r.confirmedLogRemote = newRetrying(&logRemoteOutput{client: client.WithoutRedirects()}, timeout)
 	}
 	for i := range cfg.LogOutputs {
 		entry := &cfg.LogOutputs[i]

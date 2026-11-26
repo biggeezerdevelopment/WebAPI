@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -21,13 +22,13 @@ func TestWithoutRedirectsFailsAndKeepsOriginalClient(t *testing.T) {
 		server := httptest.NewServer(http.RedirectHandler(target.URL, status))
 
 		client := NewLogClient(&config.APILogRemote{APIURL: server.URL, APIMethod: http.MethodPost})
-		if err := client.WithoutRedirects().SendLog("id", "agent", "src", []byte(`{}`)); err == nil {
+		if err := client.WithoutRedirects().SendLog(context.Background(), "id", "agent", "src", []byte(`{}`)); err == nil {
 			t.Errorf("status %d: redirected send reported success", status)
 		}
 		if got := targetHits.Load(); got != 0 {
 			t.Errorf("status %d: redirect followed %d time(s)", status, got)
 		}
-		if err := client.SendLog("id", "agent", "src", []byte(`{}`)); err != nil {
+		if err := client.SendLog(context.Background(), "id", "agent", "src", []byte(`{}`)); err != nil {
 			t.Errorf("status %d: legacy client stopped following redirects: %v", status, err)
 		}
 		if got := targetHits.Load(); got != 1 {

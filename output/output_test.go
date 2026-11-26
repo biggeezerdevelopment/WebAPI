@@ -372,39 +372,6 @@ func TestRouterFanOutOverHTTP(t *testing.T) {
 	}
 }
 
-func TestRouterLegacyOutputIsNotRetried(t *testing.T) {
-	var calls atomic.Int32
-	var body string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		data, _ := io.ReadAll(r.Body)
-		body = string(data)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	cfg := &config.Config{APILogRemote: config.APILogRemote{Enabled: true, APIURL: srv.URL, APIMethod: "POST"}}
-	router, err := NewRouter(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer router.Close()
-	d, err := router.Dispatcher(&config.WebAPI{Name: "legacy"})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rec := testRecord()
-	rec.Data = nil
-	d.Deliver(context.Background(), rec) // synchronous for a single output
-	if calls.Load() != 1 {
-		t.Errorf("calls = %d, want 1", calls.Load())
-	}
-	if !strings.Contains(body, `"api_results":null`) {
-		t.Errorf("body = %s", body)
-	}
-}
-
 func TestRouterEmptyRoutesDeliverNothing(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))

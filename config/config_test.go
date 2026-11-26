@@ -252,3 +252,21 @@ func TestBodyEncoding(t *testing.T) {
 		})
 	}
 }
+
+func TestAPILogRemoteTimeout(t *testing.T) {
+	if got := (APILogRemote{}).TimeoutSeconds(); got != DefaultAPILogRemoteTimeout {
+		t.Fatalf("default = %d, want %d", got, DefaultAPILogRemoteTimeout)
+	}
+	if got := (APILogRemote{APITimeout: 7}).TimeoutSeconds(); got != 7 {
+		t.Fatalf("explicit = %d, want 7", got)
+	}
+	for _, bad := range []int{-1, MaxOutputTimeout + 1} {
+		l := validLogRemote()
+		l.APITimeout = bad
+		cfg := Config{APILogRemote: l}
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "api_timeout") {
+			t.Errorf("api_timeout %d: err = %v", bad, err)
+		}
+	}
+}

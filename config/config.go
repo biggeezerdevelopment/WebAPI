@@ -129,12 +129,27 @@ func (w *WebAPI) TLSOptions() tlsconfig.Options {
 	return *w.TLS
 }
 
+// DefaultAPILogRemoteTimeout is the apilogremote timeout in seconds when
+// api_timeout is omitted. It was the fixed per-request timeout before retries.
+const DefaultAPILogRemoteTimeout = 30
+
 type APILogRemote struct {
 	Enabled    bool     `yaml:"enabled"`
 	APIURL     string   `yaml:"api_url"`
 	APIMethod  string   `yaml:"api_method"`
 	APIHeaders []Header `yaml:"api_headers"`
 	SkipVerify bool     `yaml:"skip_verify"`
+	// APITimeout bounds one record's delivery, including retries, in seconds.
+	// 0 means DefaultAPILogRemoteTimeout.
+	APITimeout int `yaml:"api_timeout"`
+}
+
+// TimeoutSeconds returns api_timeout, or the default when it is omitted.
+func (l APILogRemote) TimeoutSeconds() int {
+	if l.APITimeout == 0 {
+		return DefaultAPILogRemoteTimeout
+	}
+	return l.APITimeout
 }
 
 type JarvisAgent struct {
@@ -179,6 +194,9 @@ func (c *Config) Validate() error {
 		}
 		if !isHTTPMethod(c.APILogRemote.APIMethod) {
 			return fmt.Errorf("apilogremote: invalid api_method %q", c.APILogRemote.APIMethod)
+		}
+		if t := c.APILogRemote.APITimeout; t < 0 || t > MaxOutputTimeout {
+			return fmt.Errorf("apilogremote: api_timeout must be between 1 and %d seconds, or omitted, got %d", MaxOutputTimeout, t)
 		}
 	}
 
