@@ -1,15 +1,15 @@
 # WebAPI Agent
 
-A Go-based agent that collects and forwards metrics from various web APIs to a centralized logging system.
+A Go-based agent that polls web APIs and audit logs and forwards each result to webhook, syslog or remote log outputs.
 
 ## Overview
 
 This project implements a configurable agent that can:
-- Monitor multiple web APIs simultaneously
-- Collect metrics from configured endpoints
-- Forward collected data to a remote logging system
-- Support various authentication methods
-- Handle different API request methods and content types
+- Poll multiple web APIs at once, each on its own `sleeptime`
+- Collect audit logs from GitHub, Atlassian organizations, Jira Cloud and Stripe, with checkpointed, at-least-once delivery
+- Route each source to named webhook or syslog outputs, or to `apilogremote`
+- Read credentials from environment variables instead of the config file
+- Send a periodic heartbeat so a SIEM can tell the agent is alive
 
 ## Prerequisites
 
@@ -192,7 +192,7 @@ heartbeat:
       "last_poll_at": "2026-11-25T22:10:00Z",
       "last_success_at": "2026-11-25T22:10:00Z",
       "errors_since_last": 2,
-      "last_error": "GET https://api.github.com/orgs/x/audit-log: 502 Bad Gateway",
+      "last_error": "unexpected status code: 502",
       "last_error_at": "2026-11-25T22:05:00Z",
       "outputs": [
         {
@@ -443,37 +443,48 @@ The agent reads `config.yml` from its working directory. To run it as a systemd 
 
 ## Features
 
-- Multiple API monitoring support
-- Configurable request intervals
-- Remote logging capability
-- Support for various authentication methods:
+- Multiple API monitoring, each source polled independently
+- Audit log collectors: `github_audit`, `atlassian_org_audit`, `jira_audit`, `stripe_activity_logs`
+- Per-output checkpoints saved atomically in `state_dir`
+- Named outputs: `webhook` and `syslog` (`tls`, `tcp` or `udp`), plus `apilogremote`
+- Per-source routing with `outputs`
+- Retries with exponential backoff within each named output's `timeout` (`apilogremote` is not retried)
+- Authentication:
   - API Key
   - Basic Authentication
-- Customizable headers and request parameters
-- SSL verification options
-- Configurable timeouts
+- Secrets from the environment: `api_key_env`, `api_password_env`, header `value_env`
+- Customizable headers, query parameters and request body
+- TLS 1.2+ with verification by default, custom CA (`ca_file`), mutual TLS and `server_name`
+- Configurable request intervals and timeouts
+- Heartbeat with per-source poll and delivery status
 
 ## Project Structure
 
 ```
 .
-├── api/            # API client implementations
-├── collector/      # Checkpointed audit log collectors (GitHub, Atlassian, Jira, Stripe)
-├── config/         # Configuration handling
-├── output/         # Named log outputs, routing, and delivery
-├── tlsconfig/      # Shared client TLS configuration builder
-├── main.go         # Main application entry point
-├── config.yml      # Configuration file
-├── go.mod          # Go module definition
-└── go.sum          # Go module checksums
+├── api/                # API client implementations
+├── collector/          # Checkpointed audit log collectors (GitHub, Atlassian, Jira, Stripe)
+├── config/             # Configuration loading and validation
+├── heartbeat/          # Periodic heartbeat sender
+├── internal/testcerts/ # Throwaway certificates for tests
+├── output/             # Named log outputs, routing, and delivery
+├── status/             # Per-source poll and delivery status for the heartbeat
+├── tlsconfig/          # Shared client TLS configuration builder
+├── main.go             # Main application entry point
+├── config.yml          # Configuration file
+├── DEPLOYMENT.md       # Running as a service and protecting credentials
+├── go.mod              # Go module definition
+└── go.sum              # Go module checksums
 ```
 
 ## Error Handling
 
-The agent includes comprehensive error handling:
-- Failed API requests are logged
-- Remote logging failures are logged
-- Configuration loading errors are handled gracefully
+- A failed plain API request is logged and still forwarded, with null data.
+- A failed collector poll is logged and forwards nothing. The next poll resumes from each output's checkpoint.
+- Named output sends are retried up to 3 times within the output's `timeout`. Failures and dropped records are logged with the source and output names.
+- A collector output that keeps failing is retried with a doubling delay of up to one hour.
+- An invalid config, an unset or empty environment variable, a bad TLS file, or a corrupt state file stops startup. Errors name the variable, never its value.
+- The heartbeat reports poll and delivery errors, with credentials removed from the error text.
 
 ## Contributing
 

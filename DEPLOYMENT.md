@@ -39,6 +39,12 @@ SIEM_WEBHOOK_AUTH
 - The agent has no signal handling, so a stop request ends the process at once.
 - Stopping the service is still safe, because checkpoints are written atomically (temp file, fsync, rename). At worst, events delivered since the last checkpoint are sent again (at-least-once delivery).
 
+**Heartbeat.** If the heartbeat is enabled (see [README.md](README.md#heartbeat)):
+
+- Stopping or restarting the service stops heartbeats. The SIEM's missing-heartbeat alert fires if the service is down longer than the alert threshold, so plan for it or suppress it during maintenance.
+- On restart the agent sends a heartbeat at startup, after all collectors are built, which makes the restart visible.
+- Counts and last-seen values are kept in memory only. They start empty after a restart, so the startup heartbeat's last-poll fields may be `null`.
+
 ### Build
 
 Linux:
@@ -151,6 +157,8 @@ sudo systemctl enable --now webapi
 sudo systemctl status webapi
 journalctl -u webapi -f
 ```
+
+For remote liveness, enable the heartbeat described in [README.md](README.md#heartbeat).
 
 ### Rotate a Key
 
@@ -286,6 +294,8 @@ state_dir: 'C:\ProgramData\WebAPI\state'
 nssm status webapi
 Get-Content "C:\ProgramData\WebAPI\logs\webapi.log" -Wait -Tail 50
 ```
+
+For remote liveness, enable the heartbeat described in [README.md](README.md#heartbeat).
 
 ### Rotate a Key
 
