@@ -103,10 +103,10 @@ func shutdown(wait func(), closeFn func() error, timeout time.Duration) error {
 	}
 }
 
-// options are the command-line settings.
 // version is set at build time with -ldflags "-X main.version=<tag>".
 var version = "dev"
 
+// options are the command-line settings.
 type options struct {
 	configPath  string
 	checkConfig bool

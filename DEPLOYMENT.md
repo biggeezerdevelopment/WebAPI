@@ -48,6 +48,10 @@ SIEM_WEBHOOK_AUTH
 
 ### Build
 
+Each `v*` tag publishes prebuilt binaries and a `SHA256SUMS` file as a GitHub release (see [README.md](README.md#building)). Release files are named `webapi-agent_<tag>_<os>_<arch>`, with `.exe` on Windows. Verify the checksum, then rename the file to `webapi-agent` or `webapi-agent.exe` so it matches the commands below. Run `webapi-agent -version` to confirm which build is installed.
+
+To build from source instead:
+
 Linux:
 
 ```bash
