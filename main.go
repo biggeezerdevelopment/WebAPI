@@ -9,7 +9,9 @@ import (
 	"webapi/api"
 	"webapi/collector"
 	"webapi/config"
+	"webapi/heartbeat"
 	"webapi/output"
+	"webapi/status"
 )
 
 // fetcher performs one poll of a source.
@@ -22,12 +24,24 @@ type deliverer interface {
 	Deliver(ctx context.Context, rec output.Record)
 }
 
+// pollStatus records each plain poll's outcome for the heartbeat.
+// *status.Source implements it.
+type pollStatus interface {
+	PollStarted()
+	PollSucceeded()
+	PollFailed(err error)
+}
+
 // pollOnce fetches once and forwards the result. A failed poll is still
 // forwarded, with nil data, so that receivers see a null result.
-func pollOnce(ctx context.Context, agent config.JarvisAgent, name string, f fetcher, d deliverer) {
+func pollOnce(ctx context.Context, agent config.JarvisAgent, name string, f fetcher, d deliverer, st pollStatus) {
+	st.PollStarted()
 	body, err := f.SendRequest()
 	if err != nil {
 		log.Printf("Error sending request to %s: %v", name, err)
+		st.PollFailed(err)
+	} else {
+		st.PollSucceeded()
 	}
 	d.Deliver(ctx, output.Record{
 		AgentID:   agent.ID,
@@ -56,6 +70,7 @@ func main() {
 
 	ctx := context.Background()
 	var wg sync.WaitGroup
+	reg := status.NewRegistry(cfg)
 
 	// Build every collector first, so that bad state stops startup before any
 	// source has begun polling.
@@ -75,11 +90,26 @@ func main() {
 			StateDir: cfg.StateDir,
 			Fetcher:  api.NewClient(apiCfg),
 			Outputs:  routes,
+			Status:   reg.Source(apiCfg.Name),
 		})
 		if err != nil {
 			log.Fatalf("Failed to start collector %q: %v", apiCfg.Name, err)
 		}
 		collectors[i] = c
+	}
+
+	if cfg.Heartbeat.Enabled {
+		hb, err := router.HeartbeatDispatcher(cfg.Heartbeat.SourceName(), cfg.Heartbeat.Outputs)
+		if err != nil {
+			log.Fatalf("Failed to route heartbeat: %v", err)
+		}
+		ticker := time.NewTicker(time.Duration(cfg.Heartbeat.IntervalSeconds()) * time.Second)
+		defer ticker.Stop()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			heartbeat.Run(ctx, reg, hb, cfg.JarvisAgent, cfg.Heartbeat.SourceName(), ticker.C)
+		}()
 	}
 
 	// Initialize API clients for each enabled WebAPI
@@ -98,7 +128,8 @@ func main() {
 		}
 
 		client := api.NewClient(apiCfg)
-		dispatcher, err := router.Dispatcher(apiCfg)
+		src := reg.Source(apiCfg.Name)
+		dispatcher, err := router.ObservedDispatcher(apiCfg, src)
 		if err != nil {
 			log.Fatalf("Failed to route log outputs: %v", err)
 		}
@@ -108,7 +139,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for {
-				pollOnce(ctx, cfg.JarvisAgent, apiCfg.Name, client, dispatcher)
+				pollOnce(ctx, cfg.JarvisAgent, apiCfg.Name, client, dispatcher, src)
 				time.Sleep(time.Duration(apiCfg.SleepTime) * time.Second)
 			}
 		}()
