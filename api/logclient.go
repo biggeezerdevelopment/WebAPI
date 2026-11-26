@@ -99,7 +99,7 @@ func (c *LogClient) SendLog(ctx context.Context, agentID, agentName, source stri
 		bytes.NewBuffer(jsonData),
 	)
 	if err != nil {
-		return fmt.Errorf("error creating request: %v", err)
+		return fmt.Errorf("error creating request: %w", withoutURL(err))
 	}
 
 	// Add headers
@@ -109,12 +109,12 @@ func (c *LogClient) SendLog(ctx context.Context, agentID, agentName, source stri
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("error sending log: %v", err)
+		return fmt.Errorf("error sending log: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("unexpected status code from log API: %d", resp.StatusCode)
+		return StatusError("log API", resp.StatusCode)
 	}
 
 	return nil

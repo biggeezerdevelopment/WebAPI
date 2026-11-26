@@ -51,6 +51,8 @@ type DeliveryObserver interface {
 
 // retrying retries an Output with exponential backoff. The whole sequence for
 // a record, including backoff, is bounded by timeout and the caller's context.
+// Errors that repeat on every attempt, an oversized syslog message or a
+// refused redirect, are not retried.
 type retrying struct {
 	Output
 	timeout time.Duration
@@ -71,7 +73,7 @@ func (r *retrying) Send(ctx context.Context, rec Record) error {
 		if err == nil {
 			return nil
 		}
-		if attempt > maxRetries || ctx.Err() != nil || errors.Is(err, ErrSyslogMessageTooLarge) {
+		if attempt > maxRetries || ctx.Err() != nil || errors.Is(err, ErrSyslogMessageTooLarge) || errors.Is(err, api.ErrRedirect) {
 			return fmt.Errorf("giving up after %d attempt(s): %w", attempt, err)
 		}
 

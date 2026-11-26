@@ -82,7 +82,7 @@ func (c *Client) SendRequest(ctx context.Context) ([]byte, error) {
 		body,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("error creating request: %v", err)
+		return nil, fmt.Errorf("error creating request: %w", withoutURL(err))
 	}
 
 	// Add headers
@@ -106,7 +106,7 @@ func (c *Client) SendRequest(ctx context.Context) ([]byte, error) {
 		if errors.Is(err, context.Canceled) {
 			return nil, fmt.Errorf("request canceled: %w", context.Canceled)
 		}
-		return nil, fmt.Errorf("error sending request: %v", err)
+		return nil, fmt.Errorf("error sending request: %w", withoutURL(err))
 	}
 	defer resp.Body.Close()
 

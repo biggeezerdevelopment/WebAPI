@@ -95,7 +95,7 @@ func (w *Webhook) Send(ctx context.Context, rec Record) error {
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("unexpected status code from webhook: %d", resp.StatusCode)
+		return api.StatusError("webhook", resp.StatusCode)
 	}
 	return nil
 }

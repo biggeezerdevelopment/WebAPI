@@ -154,7 +154,7 @@ logoutputs:
 - `tls` and `tcp` reuse one connection with octet-counted framing (RFC 5425) and reconnect after a failure. A record that was resent after a failed write can arrive twice.
 - `udp` sends one datagram per message. A message over 65,000 bytes is dropped with an error rather than truncated, and operating system limits on datagram size may be lower.
 
-**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request or message and retried up to 3 times with exponential backoff within the output's `timeout` (`api_timeout` for `apilogremote`). Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged. The optional heartbeat (see Heartbeat) reports these outcomes. Collector sources (`github_audit`, `atlassian_org_audit`, `jira_audit`, `stripe_activity_logs`) use the stronger delivery described below.
+**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request or message and retried up to 3 times with exponential backoff within the output's `timeout` (`api_timeout` for `apilogremote`). A redirect that is not followed (301, 302, 303, 307 or 308) fails after one attempt, because every retry would fail the same way. Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged. The optional heartbeat (see Heartbeat) reports these outcomes. Collector sources (`github_audit`, `atlassian_org_audit`, `jira_audit`, `stripe_activity_logs`) use the stronger delivery described below.
 
 ### Heartbeat
 
@@ -323,7 +323,7 @@ webapi:
 - A failed poll forwards nothing. `Link` pagination, `Retry-After` (on rate-limit and 5xx responses), and rate-limit headers are honored. Pagination links to another origin and redirects are refused so the token stays with the configured host.
 - A fetch reads at most 100 pages, counted from the page that passes the checkpoint's timestamp. Pages before that do not count, so a very busy second, or a source that must start below the checkpoint, cannot stall an output. If 10,000 pages do not pass it, the poll logs a "no progress" error, delivers nothing to the outputs at that checkpoint, retries them with a doubling delay, and still serves other outputs. `per_page` must be 1 to 100. Keep it at `100` to avoid this and to limit rate-limit use.
 - State is saved atomically in `state_dir`, one file per source. A corrupt file, or a checkpoint that is negative or in the future, stops startup. Run only one agent per `state_dir`.
-- Collector delivery to `apilogremote` treats any redirect as a failed send, because a followed redirect can drop the request body. Plain sources keep following redirects on that output.
+- Collector delivery to `apilogremote` treats any redirect as a failed send, without retries, because a followed redirect can drop the request body. Plain sources keep following redirects on that output.
 - A record that fails permanently, such as one too large for UDP syslog, holds that output at that record until the cause is fixed.
 - Syslog has no application-level acknowledgement, so the agent logs a startup warning when a collector routes to it on any transport. Over `tls` or `tcp`, a write succeeds once it reaches the local socket buffer, so events written during a silent peer hang or network partition can be lost even though their checkpoint advances. A closed connection is detected and retried. UDP confirms nothing. Use a webhook output where at-least-once delivery is required.
 - An event GitHub publishes with a timestamp older than an output's checkpoint is not delivered to that output, because delivering it would break timestamp order.
@@ -496,9 +496,9 @@ The agent stops gracefully on SIGINT or SIGTERM (see Error Handling). To run it 
 
 ## Error Handling
 
-- A failed plain API request is logged and still forwarded, with null data.
+- A failed plain API request is logged and still forwarded, with null data. Request and connection errors from sources and `apilogremote` leave out the request URL, so query parameters such as `params` do not reach the logs.
 - A failed collector poll is logged and forwards nothing. The next poll resumes from each output's checkpoint.
-- Output sends, including `apilogremote`, are retried up to 3 times within the output's `timeout` (`api_timeout` for `apilogremote`). Failures and dropped records are logged with the source and output names.
+- Output sends, including `apilogremote`, are retried up to 3 times within the output's `timeout` (`api_timeout` for `apilogremote`). A redirect that is not followed is not retried. Failures and dropped records are logged with the source and output names.
 - A collector output that keeps failing is retried with a doubling delay of up to one hour.
 - An invalid config, an unset or empty environment variable, a bad TLS file on a source or output, or a corrupt state file stops startup. Errors name the variable, never its value.
 - The heartbeat reports poll and delivery errors, with credentials removed from the error text.
