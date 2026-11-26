@@ -59,6 +59,27 @@ type PageFetcher interface {
 	FetchPage(ctx context.Context, pageURL string) (*api.Page, error)
 }
 
+// StatusHook receives poll and delivery outcomes for the heartbeat. Methods
+// must be safe for concurrent use. status.Source implements it.
+type StatusHook interface {
+	PollStarted()
+	PollSucceeded()
+	PollFailed(err error)
+	Delivered(output string)
+	DeliveryFailed(output string, err error)
+	Checkpointed(output string, at time.Time)
+}
+
+// noStatus is used when Options.Status is nil.
+type noStatus struct{}
+
+func (noStatus) PollStarted()                   {}
+func (noStatus) PollSucceeded()                 {}
+func (noStatus) PollFailed(error)               {}
+func (noStatus) Delivered(string)               {}
+func (noStatus) DeliveryFailed(string, error)   {}
+func (noStatus) Checkpointed(string, time.Time) {}
+
 // Options configures a Collector.
 type Options struct {
 	Agent    config.JarvisAgent
@@ -66,12 +87,15 @@ type Options struct {
 	StateDir string
 	Fetcher  PageFetcher
 	Outputs  []output.NamedOutput
+	// Status, when set, is told each poll and delivery outcome.
+	Status StatusHook
 }
 
 // Collector polls one checkpointed audit-log source.
 type Collector struct {
 	opts      Options
 	src       Source
+	status    StatusHook
 	statePath string
 	now       func() time.Time
 	sleep     func(context.Context, time.Duration) error
@@ -121,9 +145,17 @@ func newCollectorWithSource(opts Options, src Source, now func() time.Time) (*Co
 			return nil, err
 		}
 	}
+	hook := opts.Status
+	if hook == nil {
+		hook = noStatus{}
+	}
+	for _, out := range opts.Outputs {
+		hook.Checkpointed(out.Name, time.UnixMilli(state[out.Name].TimestampMS))
+	}
 	return &Collector{
 		opts:      opts,
 		src:       src,
+		status:    hook,
 		statePath: path,
 		now:       now,
 		sleep:     sleepContext,
@@ -157,7 +189,24 @@ func (c *Collector) Wait() { c.wg.Wait() }
 //
 // Fetches run newest checkpoint first, with failing outputs last, so a deep
 // backlog cannot spend the rate limit before caught-up outputs are served.
+//
+// A poll that fetched nothing is not reported to Status, and neither is one
+// ended by ctx.
 func (c *Collector) Poll(ctx context.Context) error {
+	fetched := false
+	err := c.poll(ctx, &fetched)
+	if !fetched || ctx.Err() != nil {
+		return err
+	}
+	if err != nil {
+		c.status.PollFailed(err)
+	} else {
+		c.status.PollSucceeded()
+	}
+	return err
+}
+
+func (c *Collector) poll(ctx context.Context, fetched *bool) error {
 	current := c.now()
 	if current.Before(c.notBefore) {
 		return nil
@@ -182,6 +231,10 @@ func (c *Collector) Poll(ctx context.Context) error {
 	var stalled error
 	for len(pending) > 0 {
 		floor := nextFloor(pending, failing)
+		if !*fetched {
+			*fetched = true
+			c.status.PollStarted()
+		}
 		events, complete, err := c.fetchWindow(ctx, floor)
 		if errors.Is(err, errNoProgress) {
 			// Only outputs at this floor are stuck. Back them off so the costly
@@ -352,14 +405,18 @@ func (c *Collector) deliver(ctx context.Context, out output.NamedOutput, batch [
 				return // Shutdown is not an output failure.
 			}
 			log.Printf("Error delivering event from collector %q to output %q, will resume from its checkpoint: %v", source, out.Name, err)
+			c.status.DeliveryFailed(out.Name, err)
 			c.recordOutcome(out.Name, true, i > 0)
 			return
 		}
 		if err := c.advance(out.Name, ev); err != nil {
 			log.Printf("Error saving checkpoint for collector %q output %q: %v", source, out.Name, err)
+			c.status.DeliveryFailed(out.Name, fmt.Errorf("saving checkpoint: %w", err))
 			c.recordOutcome(out.Name, true, i > 0)
 			return
 		}
+		c.status.Delivered(out.Name)
+		c.status.Checkpointed(out.Name, time.UnixMilli(ev.ts))
 	}
 	c.recordOutcome(out.Name, false, true)
 }

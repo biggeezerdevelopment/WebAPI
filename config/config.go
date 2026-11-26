@@ -131,6 +131,7 @@ type Config struct {
 	APILogRemote APILogRemote `yaml:"apilogremote"`
 	LogOutputs   []LogOutput  `yaml:"logoutputs"`
 	WebAPI       []WebAPI     `yaml:"webapi"`
+	Heartbeat    Heartbeat    `yaml:"heartbeat"`
 }
 
 func LoadConfig(filename string) (*Config, error) {
@@ -184,7 +185,10 @@ func (c *Config) Validate() error {
 	if err := c.validateRoutes(); err != nil {
 		return err
 	}
-	return c.validateCollectors()
+	if err := c.validateCollectors(); err != nil {
+		return err
+	}
+	return c.validateHeartbeat()
 }
 
 func (w *WebAPI) validate() error {

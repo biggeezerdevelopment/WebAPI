@@ -187,3 +187,10 @@ webapi:
         metrics: "20"
       body:
         - "metrics"
+
+# Periodic liveness record for a SIEM. See README "Heartbeat".
+heartbeat:
+    enabled: false
+    interval: 300               # seconds, 30-3600
+    name: "heartbeat"           # record Source field
+    outputs: ["siem-webhook"]   # required when enabled

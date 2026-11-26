@@ -211,12 +211,18 @@ func (c *Config) validateOutputs() error {
 	return nil
 }
 
-// validateRoutes rejects routes that would silently drop data.
-func (c *Config) validateRoutes() error {
+// outputStates maps every known output name to whether it is enabled.
+func (c *Config) outputStates() map[string]bool {
 	enabled := map[string]bool{APILogRemoteOutputName: c.APILogRemote.Enabled}
 	for i := range c.LogOutputs {
 		enabled[c.LogOutputs[i].Name] = c.LogOutputs[i].Enabled
 	}
+	return enabled
+}
+
+// validateRoutes rejects routes that would silently drop data.
+func (c *Config) validateRoutes() error {
+	enabled := c.outputStates()
 
 	for i := range c.WebAPI {
 		entry := &c.WebAPI[i]
@@ -287,7 +293,8 @@ func (c *Config) OutputWarnings() []string {
 			warnings = append(warnings, fmt.Sprintf("log output %q has TLS verification disabled (skip_verify: true)", entry.Name))
 		}
 	}
-	return append(warnings, c.collectorWarnings()...)
+	warnings = append(warnings, c.collectorWarnings()...)
+	return append(warnings, c.heartbeatWarnings()...)
 }
 
 // hasValidPort reports whether the URL's port, if any, is in 1-65535. It is

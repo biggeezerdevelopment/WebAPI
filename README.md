@@ -148,7 +148,122 @@ logoutputs:
 - `tls` and `tcp` reuse one connection with octet-counted framing (RFC 5425) and reconnect after a failure. A record that was resent after a failed write can arrive twice.
 - `udp` sends one datagram per message. A message over 65,000 bytes is dropped with an error rather than truncated, and operating system limits on datagram size may be lower.
 
-**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request or message and retried up to 3 times with exponential backoff within the output's `timeout`. Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged. Collector sources (`github_audit`, `atlassian_org_audit`, `jira_audit`, `stripe_activity_logs`) use the stronger delivery described below.
+**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request or message and retried up to 3 times with exponential backoff within the output's `timeout`. Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged. The optional heartbeat (see Heartbeat) reports these outcomes. Collector sources (`github_audit`, `atlassian_org_audit`, `jira_audit`, `stripe_activity_logs`) use the stronger delivery described below.
+
+### Heartbeat
+
+The agent can send a periodic heartbeat record to one or more outputs so a SIEM can tell that it is alive. Each heartbeat lists every enabled `webapi` entry with its last pull, its last successful pull, and the pull and delivery errors since the previous heartbeat.
+
+```yaml
+heartbeat:
+    enabled: true
+    interval: 300               # Seconds, 30-3600, default 300
+    name: "webapi-heartbeat"    # Record Source, default "heartbeat"
+    outputs: ["siem-webhook"]   # Required
+```
+
+- When `enabled` is false or the block is omitted, nothing changes. `config.yml` ships a disabled example.
+- `outputs` is required. Each name must be an enabled output, including `apilogremote`, and must be listed only once.
+- `name` cannot match the name of an enabled `webapi` entry.
+- A bad value stops the agent at startup.
+- The agent logs a startup warning when the heartbeat routes to a UDP syslog output, because UDP cannot confirm delivery.
+
+**Schedule.**
+
+- One heartbeat is sent at startup, after all collectors are built, so a restart is visible.
+- After that, one heartbeat is sent every `interval`, independent of each source's `sleeptime`.
+- The startup heartbeat can go out before the first polls finish, so its last-seen fields may be `null`.
+
+**Payload.** The record's Source is `name` and its timestamp is the snapshot time. Its data holds:
+
+```json
+{
+  "type": "heartbeat",
+  "healthy": false,
+  "started_at": "2026-11-25T20:00:00Z",
+  "uptime_seconds": 7800,
+  "interval_seconds": 300,
+  "sources": [
+    {
+      "name": "github-audit",
+      "kind": "collector",
+      "collector_type": "github_audit",
+      "sleeptime_seconds": 60,
+      "last_poll_at": "2026-11-25T22:10:00Z",
+      "last_success_at": "2026-11-25T22:10:00Z",
+      "errors_since_last": 2,
+      "last_error": "GET https://api.github.com/orgs/x/audit-log: 502 Bad Gateway",
+      "last_error_at": "2026-11-25T22:05:00Z",
+      "outputs": [
+        {
+          "name": "siem-webhook",
+          "last_delivery_at": "2026-11-25T22:10:01Z",
+          "delivery_failures_since_last": 0,
+          "last_delivery_error": null,
+          "last_delivery_error_at": null,
+          "checkpoint": "2026-11-25T22:09:58Z"
+        }
+      ]
+    },
+    {
+      "name": "qualys",
+      "kind": "plain",
+      "collector_type": null,
+      "sleeptime_seconds": 30,
+      "last_poll_at": "2026-11-25T22:09:30Z",
+      "last_success_at": "2026-11-25T22:09:30Z",
+      "errors_since_last": 0,
+      "last_error": null,
+      "last_error_at": null,
+      "outputs": [
+        {
+          "name": "siem-webhook",
+          "last_delivery_at": "2026-11-25T22:09:31Z",
+          "delivery_failures_since_last": 0,
+          "last_delivery_error": null,
+          "last_delivery_error_at": null
+        }
+      ]
+    }
+  ]
+}
+```
+
+- Times are RFC 3339 in UTC. A value that has not been seen yet is `null`.
+- `errors_since_last` and `delivery_failures_since_last` reset after every heartbeat. Last-seen times and the most recent error are kept.
+- Plain entries have `kind: "plain"`, `collector_type: null` and no `checkpoint` field.
+- `checkpoint` appears only on collector outputs. It is seeded from the state file at startup. It is the newest delivered event time as saved in the state file, or the start of the `initial_lookback_hours` window for an output with no saved state. It advances as events are delivered.
+
+**What counts as a pull.**
+
+- **Plain entry:** the request returned no error. A failed request counts as an error.
+- **Collector:** the poll made at least one fetch. It is an error when the poll returns one and a success otherwise.
+- A collector poll that made no fetch is not counted. This happens when every output was busy or backing off, or when the collector is waiting out a rate limit. A poll ended by shutdown is not counted either.
+- A collector "no progress" stall is different: it is returned as a poll error and is counted.
+
+**What counts as a delivery.**
+
+- **Plain entries:** each record sent to an output is a delivery or a failure. A record dropped because that output's queue was full counts as a failure.
+- **Collectors:** each delivered event counts as a delivery and updates `checkpoint`. A failed batch counts as one failure.
+- Work interrupted by shutdown is never counted as an error or a failure.
+
+**Healthy flag.** `healthy` is `false` while a source or output has failed more recently than it last succeeded, or when any `errors_since_last` or `delivery_failures_since_last` is above 0. It stays `false` across heartbeats, even after the counts reset, until the source has a successful pull or the output has a successful delivery. One SIEM rule on this field covers every source.
+
+**Error text.** Errors are cleaned before they are stored, so credentials in `params` or URLs do not reach the SIEM:
+
+- Query strings, fragments and `user:pass@` are removed from URLs.
+- URL paths are kept, so do not put secrets in `endpoint` paths.
+- A URL that cannot be parsed is replaced with `scheme://[redacted]`.
+- Control characters such as newlines become spaces.
+- Text is cut to 512 bytes on a character boundary and ends with `…`.
+
+**Heartbeat delivery.** Heartbeats use the normal retries within each output's `timeout`, except `apilogremote`, which is sent once and not retried. A failed heartbeat is logged, and the heartbeat's own deliveries are not tracked in later heartbeats. The SIEM sees a missing heartbeat instead, which is the signal to alert on.
+
+**Suggested SIEM rules.**
+
+- Alert when no record with Source `name` arrives for twice `interval`, for example 10 minutes at `interval: 300`. This means the agent is down or cannot reach the output.
+- Alert on any heartbeat with `healthy: false`, and use `sources[].last_error` and `outputs[].last_delivery_error` to find the cause.
+- Optionally, alert when a source's `last_success_at` is older than a few multiples of its `sleeptime_seconds`.
 
 ### GitHub Audit Log Collector
 
