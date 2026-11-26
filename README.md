@@ -232,13 +232,14 @@ heartbeat:
 - Times are RFC 3339 in UTC. A value that has not been seen yet is `null`.
 - `errors_since_last` and `delivery_failures_since_last` reset after every heartbeat. Last-seen times and the most recent error are kept.
 - Plain entries have `kind: "plain"`, `collector_type: null` and no `checkpoint` field.
-- `checkpoint` appears only on collector outputs. It is the newest delivered event time, or the start of the lookback window until an event is delivered.
+- `checkpoint` appears only on collector outputs. It is seeded from the state file at startup. It is the newest delivered event time as saved in the state file, or the start of the `initial_lookback_hours` window for an output with no saved state. It advances as events are delivered.
 
 **What counts as a pull.**
 
 - **Plain entry:** the request returned no error. A failed request counts as an error.
 - **Collector:** the poll made at least one fetch. It is an error when the poll returns one and a success otherwise.
-- A collector poll that made no fetch, because every output was busy or backing off, is not counted. A poll ended by shutdown is not counted either.
+- A collector poll that made no fetch is not counted. This happens when every output was busy or backing off, or when the collector is waiting out a rate limit. A poll ended by shutdown is not counted either.
+- A collector "no progress" stall is different: it is returned as a poll error and is counted.
 
 **What counts as a delivery.**
 
@@ -246,16 +247,17 @@ heartbeat:
 - **Collectors:** each delivered event counts as a delivery and updates `checkpoint`. A failed batch counts as one failure.
 - Work interrupted by shutdown is never counted as an error or a failure.
 
-**Healthy flag.** `healthy` is `false` when any source has `errors_since_last` above 0, or any output has `delivery_failures_since_last` above 0. One SIEM rule on this field covers every source.
+**Healthy flag.** `healthy` is `false` while a source or output has failed more recently than it last succeeded, or when any `errors_since_last` or `delivery_failures_since_last` is above 0. It stays `false` across heartbeats, even after the counts reset, until the source has a successful pull or the output has a successful delivery. One SIEM rule on this field covers every source.
 
 **Error text.** Errors are cleaned before they are stored, so credentials in `params` or URLs do not reach the SIEM:
 
 - Query strings, fragments and `user:pass@` are removed from URLs.
+- URL paths are kept, so do not put secrets in `endpoint` paths.
 - A URL that cannot be parsed is replaced with `scheme://[redacted]`.
 - Control characters such as newlines become spaces.
 - Text is cut to 512 bytes on a character boundary and ends with `…`.
 
-**Heartbeat delivery.** Heartbeats use the normal retries within each output's `timeout`. A failed heartbeat is logged, and the heartbeat's own deliveries are not tracked in later heartbeats. The SIEM sees a missing heartbeat instead, which is the signal to alert on.
+**Heartbeat delivery.** Heartbeats use the normal retries within each output's `timeout`, except `apilogremote`, which is sent once and not retried. A failed heartbeat is logged, and the heartbeat's own deliveries are not tracked in later heartbeats. The SIEM sees a missing heartbeat instead, which is the signal to alert on.
 
 **Suggested SIEM rules.**
 
