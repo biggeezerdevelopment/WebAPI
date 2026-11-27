@@ -52,6 +52,9 @@ func TestTornTailIsTruncated(t *testing.T) {
 			if got := drain(t, s2); !slices.Equal(got, []string{"a", "b", "c"}) {
 				t.Fatalf("got %q", got)
 			}
+			if st := s2.TakeStats(); st.Dropped != 0 {
+				t.Fatalf("Dropped = %d", st.Dropped)
+			}
 		})
 	}
 }
@@ -68,6 +71,9 @@ func TestBadCRCAtTailIsTruncated(t *testing.T) {
 	s2 := openTest(t, dir, Options{})
 	if got := drain(t, s2); !slices.Equal(got, []string{"a"}) {
 		t.Fatalf("got %q", got)
+	}
+	if st := s2.TakeStats(); st.Dropped != 0 {
+		t.Fatalf("Dropped = %d", st.Dropped)
 	}
 }
 
@@ -162,5 +168,21 @@ func TestStaleAckTempFileIsRemoved(t *testing.T) {
 	openTest(t, dir, Options{})
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatalf("stale temp file: %v", err)
+	}
+}
+
+func TestZeroFilledTailIsTruncatedSilently(t *testing.T) {
+	dir := t.TempDir()
+	s := openTest(t, dir, Options{})
+	mustAppend(t, s, "a")
+	_ = s.Close()
+	appendBytes(t, segFiles(t, dir)[0], make([]byte, 64))
+
+	s2 := openTest(t, dir, Options{})
+	if got := drain(t, s2); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("got %q", got)
+	}
+	if st := s2.TakeStats(); st.Dropped != 0 {
+		t.Fatalf("Dropped = %d", st.Dropped)
 	}
 }

@@ -154,7 +154,7 @@ WantedBy=multi-user.target
 
 `ProtectSystem=strict` makes the whole file system read-only for the agent, and `ReadWritePaths` reopens only the state directory. The agent never writes to its working directory.
 
-Output spools live under `state_dir/spool`. Each output with an enabled spool can use up to its `max_size_mb` (default 256), so size the state volume for the sum of every spool plus the collector checkpoints. Spool files hold record data in plain text. The agent creates their directories with mode 0700 and files with mode 0600, and the state directory above is `webapi:webapi 0700`. Keep it that way on any platform. On Windows only SYSTEM, Administrators and `svc-webapi` should have access to `state`.
+Output spools live under `state_dir/spool`. Each output with an enabled spool can use up to its `max_size_mb` (default 256), so size the state volume for the sum of every spool plus the collector checkpoints. Spool files hold record data in plain text, and renaming an output or disabling its spool leaves its backlog in `state_dir/spool/output-<hash>` unsent, so remove that directory. The agent creates their directories with mode 0700 and files with mode 0600, and the state directory above is `webapi:webapi 0700`. Keep it that way on any platform. On Windows only SYSTEM, Administrators and `svc-webapi` should have access to `state`.
 
 ### Enable and Monitor
 

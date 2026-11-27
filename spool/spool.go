@@ -242,6 +242,9 @@ func (s *Spool) middleCorruption(path string, off, size int64) (lost int, corrup
 		return 0, false
 	}
 	length := int64(binary.LittleEndian.Uint32(b[:]))
+	if allZero(f, off, size) {
+		return 0, false // preallocated or zero-filled tail after power loss
+	}
 	next := off + headerSize + length
 	if next >= size {
 		return 0, false
@@ -251,6 +254,24 @@ func (s *Spool) middleCorruption(path string, off, size int64) (lost int, corrup
 		after = 0
 	}
 	return 1 + after, true
+}
+
+// allZero reports whether every byte of f from off to size is zero.
+func allZero(f *os.File, off, size int64) bool {
+	buf := make([]byte, 32<<10)
+	for off < size {
+		n := int(min(int64(len(buf)), size-off))
+		if _, err := f.ReadAt(buf[:n], off); err != nil {
+			return false
+		}
+		for _, c := range buf[:n] {
+			if c != 0 {
+				return false
+			}
+		}
+		off += int64(n)
+	}
+	return true
 }
 
 func (s *Spool) listSegments() ([]uint64, error) {
@@ -519,13 +540,16 @@ func (s *Spool) Ack() error {
 	if p == nil || p.at != s.pos {
 		return nil
 	}
-	next := position{Seq: p.at.Seq, Off: p.next}
-	if err := writeAck(s.dir, next); err != nil {
-		return err
-	}
-	s.pos = next
+	// The position advances in memory even if the ack file cannot be written,
+	// so a full disk does not make Peek return the same frame forever. The
+	// next successful ack write persists the newer position; a crash before
+	// then only replays frames already sent, which at-least-once allows. The
+	// file on disk never points past memory, so it stays within the data and
+	// at a segment that still exists (a segment is removed only after an ack
+	// write past it succeeded).
+	s.pos = position{Seq: p.at.Seq, Off: p.next}
 	s.segs[0].frames--
-	return nil
+	return writeAck(s.dir, s.pos)
 }
 
 // TakeStats returns the spool's state and resets Dropped.

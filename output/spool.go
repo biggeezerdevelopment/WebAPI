@@ -49,6 +49,9 @@ type spooler struct {
 	router  *Router
 	minWait time.Duration
 	maxWait time.Duration
+	// ackFailing is true after an ack failure until an ack succeeds. Only the
+	// worker goroutine uses it.
+	ackFailing bool
 }
 
 func (s *spooler) append(origin int, rec Record) error {
@@ -83,7 +86,7 @@ func (s *spooler) run(ctx context.Context) {
 		}
 		var item spoolItem
 		if err := json.Unmarshal(payload, &item); err != nil {
-			log.Printf("Spool for output %q: skipping an unreadable record: %v", s.name, err)
+			log.Printf("Spool for output %q: skipping an unreadable record", s.name)
 			s.ack()
 			continue
 		}
@@ -106,6 +109,7 @@ func (s *spooler) run(ctx context.Context) {
 		}
 		if isPermanent(err) {
 			s.ack()
+			wait = 0
 			continue
 		}
 		wait = s.nextWait(wait)
@@ -115,10 +119,21 @@ func (s *spooler) run(ctx context.Context) {
 	}
 }
 
+// ack acknowledges the current record. A failure is logged once per streak of
+// failures, so a long disk-full outage does not fill the log.
 func (s *spooler) ack() {
-	if err := s.sp.Ack(); err != nil && !errors.Is(err, spool.ErrClosed) {
-		log.Printf("Spool for output %q: %v", s.name, err)
+	err := s.sp.Ack()
+	if err == nil {
+		s.ackFailing = false
+		return
 	}
+	if errors.Is(err, spool.ErrClosed) {
+		return
+	}
+	if !s.ackFailing {
+		log.Printf("Spool for output %q: %v (further failures are not logged until one succeeds)", s.name, err)
+	}
+	s.ackFailing = true
 }
 
 func (s *spooler) nextWait(wait time.Duration) time.Duration {

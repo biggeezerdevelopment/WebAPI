@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -250,5 +251,74 @@ func TestReadOnlyRouterOpensNoSpool(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "spool")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("read-only router created the spool dir: %v", err)
+	}
+}
+
+func TestSpoolAckFailureDoesNotResendRecords(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory permissions are not enforced here")
+	}
+	dir := t.TempDir()
+	s := &sink{down: true}
+	r := oneSpoolRouter(t, dir, s)
+	defer r.Close()
+	d, _ := r.Dispatcher(&config.WebAPI{Name: "src"})
+	const n = 5
+	for i := 0; i < n; i++ {
+		d.Deliver(context.Background(), numbered(i))
+	}
+	dirs, err := filepath.Glob(filepath.Join(dir, "spool", "output-*"))
+	if err != nil || len(dirs) != 1 {
+		t.Fatalf("spool dirs = %v, %v", dirs, err)
+	}
+	if err := os.Chmod(dirs[0], 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dirs[0], 0o700) })
+	waitFor(t, "a failed attempt", func() bool { a, _ := s.state(); return a >= 1 })
+	s.setDown(false)
+	waitFor(t, "all records", func() bool { _, got := s.state(); return len(got) >= n })
+	time.Sleep(200 * time.Millisecond)
+	attempts, got := s.state()
+	// Failed attempts happen only while the sink was down, and each record is
+	// then sent once.
+	if len(got) != n || !slices.Equal(got, numberedData(0, n)) {
+		t.Fatalf("attempts = %d, delivered %d records, want %d distinct", attempts, len(got), n)
+	}
+}
+
+func TestRouterCloseDuringBlockedSendKeepsRecord(t *testing.T) {
+	dir := t.TempDir()
+	started := make(chan struct{}, 1)
+	blocked := funcOutput{send: func(ctx context.Context, _ Record) error {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	cfg := &config.Config{StateDir: dir, LogOutputs: []config.LogOutput{spooledOutputConfig("hook")}}
+	r1 := testRouter(t, cfg, false, map[string]Output{"hook": blocked})
+	d, _ := r1.Dispatcher(&config.WebAPI{Name: "src"})
+	d.Deliver(context.Background(), numbered(7))
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("send never started")
+	}
+	begin := time.Now()
+	if err := r1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(begin); took > 500*time.Millisecond {
+		t.Fatalf("Close took %v", took)
+	}
+	s := &sink{}
+	r2 := oneSpoolRouter(t, dir, s)
+	defer r2.Close()
+	waitFor(t, "redelivery", func() bool { _, got := s.state(); return len(got) == 1 })
+	if _, got := s.state(); got[0] != `{"n":7}` {
+		t.Fatalf("got %q", got)
 	}
 }
