@@ -102,6 +102,8 @@ type LogOutput struct {
 	Timeout int               `yaml:"timeout"`
 	Headers []OutputHeader    `yaml:"headers"`
 	TLS     tlsconfig.Options `yaml:"tls"`
+	// Spool optionally keeps plain sources' records on disk until sent.
+	Spool *Spool `yaml:"spool"`
 
 	// Syslog settings.
 	Network  string `yaml:"network"`

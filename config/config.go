@@ -142,6 +142,8 @@ type APILogRemote struct {
 	// APITimeout bounds one record's delivery, including retries, in seconds.
 	// 0 means DefaultAPILogRemoteTimeout.
 	APITimeout int `yaml:"api_timeout"`
+	// Spool optionally keeps plain sources' records on disk until sent.
+	Spool *Spool `yaml:"spool"`
 }
 
 // TimeoutSeconds returns api_timeout, or the default when it is omitted.
@@ -201,6 +203,9 @@ func (c *Config) Validate() error {
 	}
 
 	if err := c.validateOutputs(); err != nil {
+		return err
+	}
+	if err := c.validateSpools(); err != nil {
 		return err
 	}
 
