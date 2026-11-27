@@ -1,33 +1,32 @@
 package diag
 
 import (
+	"io"
 	"net"
 	"testing"
 	"time"
 )
 
-// TEMPORARY: measure how much a loopback write to an unaccepted connection absorbs.
+// TEMPORARY: does a pending read change how a large write to an unaccepted
+// loopback connection completes?
 func TestLoopbackAbsorb(t *testing.T) {
-	for _, chunk := range []int{1 << 20, 32 << 20} {
-		ln, _ := net.Listen("tcp", "127.0.0.1:0")
-		c, err := net.Dial("tcp", ln.Addr().String())
-		if err != nil {
-			t.Fatal(err)
-		}
-		buf := make([]byte, chunk)
-		total := 0
-		start := time.Now()
-		for total < 1<<30 {
-			_ = c.SetWriteDeadline(time.Now().Add(time.Second))
-			n, err := c.Write(buf)
-			total += n
+	for _, reader := range []bool{false, true} {
+		for _, size := range []int{32 << 20, 128 << 20} {
+			ln, _ := net.Listen("tcp", "127.0.0.1:0")
+			c, err := net.Dial("tcp", ln.Addr().String())
 			if err != nil {
-				t.Logf("chunk=%d: wrote %d bytes in %v before error %v", chunk, total, time.Since(start), err)
-				break
+				t.Fatal(err)
 			}
-			t.Logf("chunk=%d: write ok, total %d after %v", chunk, total, time.Since(start))
+			if reader {
+				go func() { _, _ = io.Copy(io.Discard, c) }()
+				time.Sleep(50 * time.Millisecond)
+			}
+			_ = c.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			start := time.Now()
+			n, err := c.Write(make([]byte, size))
+			t.Logf("reader=%v size=%dMiB: n=%d err=%v after %v", reader, size>>20, n, err, time.Since(start))
+			c.Close()
+			ln.Close()
 		}
-		c.Close()
-		ln.Close()
 	}
 }
