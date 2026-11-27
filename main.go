@@ -213,9 +213,9 @@ type plainSource struct {
 
 // build creates the outputs, collectors, sources and heartbeat. Collectors
 // are built before anything polls, so bad state stops startup. With readOnly
-// no state file is written. On error the router is closed.
+// no state or spool file is written. On error the router is closed.
 func build(cfg *config.Config, readOnly bool) (a *agent, err error) {
-	router, err := output.NewRouter(cfg)
+	router, err := output.NewRouterWithOptions(cfg, output.RouterOptions{ReadOnly: readOnly})
 	if err != nil {
 		return nil, fmt.Errorf("Failed to create log outputs: %w", err)
 	}
@@ -225,6 +225,14 @@ func build(cfg *config.Config, readOnly bool) (a *agent, err error) {
 		}
 	}()
 	a = &agent{cfg: cfg, router: router, reg: status.NewRegistry(cfg)}
+	a.reg.SetSpoolStats(func() []status.SpoolSnapshot {
+		stats := router.TakeSpoolStats()
+		snaps := make([]status.SpoolSnapshot, 0, len(stats))
+		for _, st := range stats {
+			snaps = append(snaps, status.SpoolSnapshot{Output: st.Output, Records: st.Records, Bytes: st.Bytes, DroppedSinceLast: st.Dropped})
+		}
+		return snaps
+	})
 
 	for i := range cfg.WebAPI {
 		apiCfg := &cfg.WebAPI[i]

@@ -26,6 +26,8 @@ type Registry struct {
 	sources  []*Source
 	byName   map[string]*Source
 	byIndex  map[int]*Source
+	// spoolStats supplies output spool states for each snapshot; nil means none.
+	spoolStats func() []SpoolSnapshot
 }
 
 // Source records one webapi entry's outcomes. Its methods are safe for
@@ -177,6 +179,8 @@ type Heartbeat struct {
 	UptimeSeconds   int64            `json:"uptime_seconds"`
 	IntervalSeconds int              `json:"interval_seconds"`
 	Sources         []SourceSnapshot `json:"sources"`
+	// Spools lists output spools; it is omitted when no output spools.
+	Spools []SpoolSnapshot `json:"spools,omitempty"`
 	// At is when the snapshot was taken.
 	At time.Time `json:"-"`
 }
@@ -222,7 +226,8 @@ func (n NullableTime) MarshalJSON() ([]byte, error) {
 // Snapshot copies every source's status and resets the counts since the last
 // snapshot. Last-seen times and errors are kept. The heartbeat is unhealthy
 // when any count since the last snapshot is above zero, or when a source or
-// output has failed more recently than it last succeeded.
+// output has failed more recently than it last succeeded, or when a spool
+// dropped records since the last snapshot.
 func (r *Registry) Snapshot() Heartbeat {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -279,6 +284,14 @@ func (r *Registry) Snapshot() Heartbeat {
 		}
 		hb.Sources = append(hb.Sources, snap)
 	}
+	if r.spoolStats != nil {
+		for _, sp := range r.spoolStats() {
+			if sp.DroppedSinceLast > 0 {
+				hb.Healthy = false
+			}
+			hb.Spools = append(hb.Spools, sp)
+		}
+	}
 	return hb
 }
 
@@ -297,4 +310,20 @@ func optString(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// SpoolSnapshot is one output spool's state in a Heartbeat.
+type SpoolSnapshot struct {
+	Output           string `json:"output"`
+	Records          int    `json:"records"`
+	Bytes            int64  `json:"bytes"`
+	DroppedSinceLast int    `json:"dropped_since_last"`
+}
+
+// SetSpoolStats sets the function Snapshot calls for spool states. fn must
+// reset its drop counts on each call.
+func (r *Registry) SetSpoolStats(fn func() []SpoolSnapshot) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.spoolStats = fn
 }
