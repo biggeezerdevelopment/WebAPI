@@ -103,10 +103,14 @@ func shutdown(wait func(), closeFn func() error, timeout time.Duration) error {
 	}
 }
 
+// version is set at build time with -ldflags "-X main.version=<tag>".
+var version = "dev"
+
 // options are the command-line settings.
 type options struct {
 	configPath  string
 	checkConfig bool
+	version     bool
 }
 
 // parseFlags reads the command line. Usage and errors go to stderr.
@@ -116,6 +120,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.SetOutput(stderr)
 	fs.StringVar(&opts.configPath, "config", "config.yml", "path to the configuration file")
 	fs.BoolVar(&opts.checkConfig, "check-config", false, "validate the configuration, build outputs and collectors, and exit without polling or writing state")
+	fs.BoolVar(&opts.version, "version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -146,6 +151,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	opts, err := parseFlags(args, stderr)
 	if err != nil {
 		return 2
+	}
+	if opts.version {
+		fmt.Fprintf(stdout, "webapi-agent %s\n", version)
+		return 0
 	}
 	logger := log.New(stderr, "", log.LstdFlags)
 

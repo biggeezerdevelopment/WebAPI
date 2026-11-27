@@ -550,16 +550,48 @@ func stalledListener(t *testing.T) string {
 	return ln.Addr().String()
 }
 
+// stallingRecord is a record larger than the socket buffers. Sent to a server
+// that never reads, it stalls the write on Linux. Windows buffers one whole
+// send of any size while its send buffer is empty, so there the second such
+// send is the one that stalls.
+func stallingRecord() Record {
+	rec := testRecord()
+	rec.Data = []byte(strings.Repeat("x", 32<<20))
+	return rec
+}
+
 func TestSyslogCloseUnblocksStalledWrite(t *testing.T) {
 	cfg := syslogConfig("tcp", stalledListener(t))
 	cfg.Timeout = 60
 	s := newTestSyslog(t, cfg)
-	rec := testRecord()
-	rec.Data = []byte(strings.Repeat("x", 32<<20)) // Larger than the socket buffers.
+	rec := stallingRecord()
 
+	// Send until a send stalls, then wait until it has been stuck far longer
+	// than formatting the record takes, so Close interrupts the write itself.
+	var sendStarted atomic.Int64
 	done := make(chan error, 1)
-	go func() { done <- s.Send(context.Background(), rec) }()
-	time.Sleep(200 * time.Millisecond)
+	go func() {
+		for {
+			sendStarted.Store(time.Now().UnixNano())
+			if err := s.Send(context.Background(), rec); err != nil {
+				done <- err
+				return
+			}
+		}
+	}()
+	const stuck = 2 * time.Second
+	giveUp := time.Now().Add(syslogTestWait + stuck)
+	for started := sendStarted.Load(); started == 0 || time.Since(time.Unix(0, started)) < stuck; started = sendStarted.Load() {
+		select {
+		case err := <-done:
+			t.Fatalf("Send failed before it stalled: %v", err)
+		default:
+		}
+		if time.Now().After(giveUp) {
+			t.Fatal("no send stalled")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -583,9 +615,13 @@ func TestSyslogWriteTimesOut(t *testing.T) {
 	cfg := syslogConfig("tcp", stalledListener(t))
 	cfg.Timeout = 1
 	s := newTestSyslog(t, cfg)
-	rec := testRecord()
-	rec.Data = []byte(strings.Repeat("x", 32<<20))
-	err := s.Send(context.Background(), rec)
+	rec := stallingRecord()
+	// The first send stalls on Linux. Windows may buffer it whole, and then
+	// the second one stalls (see stallingRecord).
+	var err error
+	for attempt := 0; attempt < 2 && err == nil; attempt++ {
+		err = s.Send(context.Background(), rec)
+	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error = %v", err)
 	}

@@ -13,7 +13,7 @@ This project implements a configurable agent that can:
 
 ## Prerequisites
 
-- Go 1.23.1 or later
+- Go 1.23.1 or later. `go.mod` sets `toolchain go1.26.11`, so an older Go downloads and uses go1.26.11 to build, unless `GOTOOLCHAIN=local` is set.
 - Git
 
 ## Installation
@@ -437,6 +437,16 @@ To build the project:
 go build -o webapi-agent
 ```
 
+A local build reports its version as `dev`. To set the version, pass it at build time:
+
+```bash
+go build -trimpath -ldflags "-s -w -X main.version=v1.2.3" -o webapi-agent
+```
+
+Pushing a `v*` tag runs the release workflow (`.github/workflows/release.yml`). It builds `webapi-agent_<tag>_<os>_<arch>` (`.exe` on Windows) for linux/amd64, linux/arm64, windows/amd64 and darwin/arm64 with `CGO_ENABLED=0`, writes a `SHA256SUMS` file, and publishes everything as a GitHub release. A tag with a hyphen, such as `v1.2.3-rc1`, is published as a pre-release.
+
+CI (`.github/workflows/ci.yml`) runs `gofmt`, `go vet`, `govulncheck` and `go test -race` on Linux and Windows for every push to main and every pull request.
+
 ## Running
 
 1. Configure the `config.yml` file according to your needs
@@ -449,6 +459,7 @@ The agent reads `config.yml` from its working directory. Command-line flags:
 
 - `-config <path>` reads another file. A relative path, like a relative `state_dir`, resolves against the working directory, not the config file's folder.
 - `-check-config` loads and validates the config, prints warnings, builds the outputs, collectors and heartbeat, and exits without polling. It exits 0 and prints `configuration OK` when the config is valid, 1 on an error, and 2 on a usage error. It never writes checkpoint files, but like a normal start it creates `state_dir` if missing and checks that it is writable.
+- `-version` prints `webapi-agent <version>` and exits 0 without loading the config. The version is `dev` unless it was set at build time (see Building).
 
 ```bash
 ./webapi-agent -config /etc/webapi/config.yml -check-config
@@ -473,7 +484,8 @@ The agent stops gracefully on SIGINT or SIGTERM (see Error Handling). To run it 
 - Configurable request intervals and timeouts
 - Heartbeat with per-source poll and delivery status
 - Graceful shutdown on SIGINT or SIGTERM, bounded at 30 seconds
-- `-config` and `-check-config` command-line flags
+- `-config`, `-check-config` and `-version` command-line flags
+- CI on Linux and Windows, and release binaries with SHA256 checksums for `v*` tags
 
 ## Project Structure
 

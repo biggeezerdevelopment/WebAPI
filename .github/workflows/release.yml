@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload its assets
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Test
+        run: go test -count=1 ./...
+      - name: Build
+        env:
+          CGO_ENABLED: '0'
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir dist
+          for target in linux/amd64 linux/arm64 windows/amd64 darwin/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            ext=""
+            if [ "$os" = windows ]; then ext=".exe"; fi
+            GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -ldflags "-s -w -X main.version=${TAG}" \
+              -o "dist/webapi-agent_${TAG}_${os}_${arch}${ext}" .
+          done
+          cd dist
+          sha256sum webapi-agent_* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" --generate-notes --verify-tag $prerelease
