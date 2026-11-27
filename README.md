@@ -106,6 +106,10 @@ logoutputs:
         # key_file: "/etc/webapi/certs/client-key.pem"
         # server_name: "hooks.internal"
         # skip_verify: false
+      # spool:                  # Optional disk queue, see Spool below
+      #   enabled: true
+      #   max_size_mb: 256      # 1-102400, default 256
+      #   max_age_hours: 72     # 0-87600, default 72, 0 means never expire
 ```
 
 **Routing.** Each `webapi` entry selects its destinations with `outputs`:
@@ -154,7 +158,14 @@ logoutputs:
 - `tls` and `tcp` reuse one connection with octet-counted framing (RFC 5425) and reconnect after a failure. A record that was resent after a failed write can arrive twice.
 - `udp` sends one datagram per message. A message over 65,000 bytes is dropped with an error rather than truncated, and operating system limits on datagram size may be lower.
 
-**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request or message and retried up to 3 times with exponential backoff within the output's `timeout` (`api_timeout` for `apilogremote`). A redirect that is not followed (301, 302, 303, 307 or 308) fails after one attempt, because every retry would fail the same way. Failures are logged with the source and output names. Records are not queued on disk. A record is dropped for an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged. The optional heartbeat (see Heartbeat) reports these outcomes. Collector sources (`github_audit`, `atlassian_org_audit`, `jira_audit`, `stripe_activity_logs`) use the stronger delivery described below.
+**Delivery.** A source delivers to its outputs concurrently, so a slow or failed output does not block another. Each record is sent as one request or message and retried up to 3 times with exponential backoff within the output's `timeout` (`api_timeout` for `apilogremote`). A redirect that is not followed (301, 302, 303, 307 or 308) fails after one attempt, because every retry would fail the same way. Failures are logged with the source and output names. Unless the output has a spool, records are not queued on disk. A record is dropped for such an output when its retries are exhausted or, for a source with several outputs, when that output's bounded in-memory queue is full. Each drop is logged. For a spooled output, a plain source's records are written to disk and sent in order, at least once, so they are not dropped for exhausted retries or a full queue. A crash, or a shutdown during a send, means that record is sent again after the next start. After a failure the worker backs off from 1 s, doubling up to 5 min, and never drops the record. A permanent error, such as an oversized UDP syslog message or a refused redirect, is logged and the record is skipped. A disk error while appending is logged and counted as a delivery failure. The optional heartbeat (see Heartbeat) reports these outcomes. Collector sources (`github_audit`, `atlassian_org_audit`, `jira_audit`, `stripe_activity_logs`) use the stronger delivery described below.
+
+**Spool.** Any `logoutputs` entry, and `apilogremote`, can have a `spool` block that queues records on disk until the output accepts them. Only plain sources are spooled. Collectors (which have their own checkpoints) and heartbeats bypass the spool.
+
+- An enabled spool requires `state_dir`. Without it startup fails with `spool requires state_dir`. The limits are validated even when `enabled` is `false`.
+- Each spool is a directory `<state_dir>/spool/output-<hash>`, where the hash is derived from the output name.
+- Files are split into segments of at most 8 MiB, and no more than a quarter of `max_size_mb`. When the spool is full, the oldest whole segments are dropped. Records older than `max_age_hours` are dropped when they are read. Each drop is logged and counted in the heartbeat.
+- Spool files hold record data in plain text. The agent creates directories with mode 0700 and files with mode 0600. Restrict access to `state_dir`.
 
 ### Heartbeat
 
@@ -231,6 +242,14 @@ heartbeat:
         }
       ]
     }
+  ],
+  "spools": [
+    {
+      "output": "siem-webhook",
+      "records": 0,
+      "bytes": 0,
+      "dropped_since_last": 0
+    }
   ]
 }
 ```
@@ -238,6 +257,7 @@ heartbeat:
 - Times are RFC 3339 in UTC. A value that has not been seen yet is `null`.
 - `errors_since_last` and `delivery_failures_since_last` reset after every heartbeat. Last-seen times and the most recent error are kept.
 - Plain entries have `kind: "plain"`, `collector_type: null` and no `checkpoint` field.
+- `spools` has one entry per spooled output, with the records and bytes waiting on disk and the records dropped by the size or age limit since the previous heartbeat. `dropped_since_last` resets after every heartbeat. The array is omitted when no output has a spool.
 - `checkpoint` appears only on collector outputs. It is seeded from the state file at startup. It is the newest delivered event time as saved in the state file, or the start of the `initial_lookback_hours` window for an output with no saved state. It advances as events are delivered.
 
 **What counts as a pull.**
@@ -253,7 +273,7 @@ heartbeat:
 - **Collectors:** each delivered event counts as a delivery and updates `checkpoint`. A failed batch counts as one failure.
 - Work interrupted by shutdown is never counted as an error or a failure.
 
-**Healthy flag.** `healthy` is `false` while a source or output has failed more recently than it last succeeded, or when any `errors_since_last` or `delivery_failures_since_last` is above 0. It stays `false` across heartbeats, even after the counts reset, until the source has a successful pull or the output has a successful delivery. One SIEM rule on this field covers every source.
+**Healthy flag.** `healthy` is `false` while a source or output has failed more recently than it last succeeded, or when any `errors_since_last` or `delivery_failures_since_last` is above 0. It stays `false` across heartbeats, even after the counts reset, until the source has a successful pull or the output has a successful delivery. A `spools[].dropped_since_last` above 0 also makes it `false`. A spool backlog alone does not. One SIEM rule on this field covers every source.
 
 **Error text.** Errors are cleaned before they are stored, so credentials in `params` or URLs do not reach the SIEM:
 
@@ -458,7 +478,7 @@ CI (`.github/workflows/ci.yml`) runs `gofmt`, `go vet`, `govulncheck` and `go te
 The agent reads `config.yml` from its working directory. Command-line flags:
 
 - `-config <path>` reads another file. A relative path, like a relative `state_dir`, resolves against the working directory, not the config file's folder.
-- `-check-config` loads and validates the config, prints warnings, builds the outputs, collectors and heartbeat, and exits without polling. It exits 0 and prints `configuration OK` when the config is valid, 1 on an error, and 2 on a usage error. It never writes checkpoint files, but like a normal start it creates `state_dir` if missing and checks that it is writable.
+- `-check-config` loads and validates the config, prints warnings, builds the outputs, collectors and heartbeat, and exits without polling. It exits 0 and prints `configuration OK` when the config is valid, 1 on an error, and 2 on a usage error. It validates `spool` blocks and never writes checkpoint or spool files, but like a normal start it creates `state_dir` if missing and checks that it is writable.
 - `-version` prints `webapi-agent <version>` and exits 0 without loading the config. The version is `dev` unless it was set at build time (see Building).
 
 ```bash

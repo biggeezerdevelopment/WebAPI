@@ -40,6 +40,10 @@ apilogremote:
 #        #key_file: "/etc/webapi/certs/client-key.pem"
 #        #server_name: "hooks.internal"
 #        #skip_verify: false           # Cannot be combined with ca_file
+#      #spool:                    # Disk queue for plain sources; needs state_dir
+#      #  enabled: true           # Collectors and heartbeats bypass the spool
+#      #  max_size_mb: 256        # 1-102400; the oldest records are dropped when full
+#      #  max_age_hours: 72       # 0-87600; 0 means never expire
 #    - name: "soc-syslog"
 #      enabled: true
 #      type: "syslog"
@@ -61,7 +65,8 @@ apilogremote:
 #   outputs: []           sends to none
 #   outputs: ["siem-webhook", "apilogremote"]  sends to those named
 
-# Directory for collector checkpoints. Required when a source has a collector.
+# Directory for collector checkpoints and output spools. Required when a source
+# has a collector or an output has an enabled spool.
 #state_dir: "./state"
 
 # GitHub organization audit log source, added under webapi. The token needs

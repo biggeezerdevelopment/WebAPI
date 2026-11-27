@@ -154,6 +154,8 @@ WantedBy=multi-user.target
 
 `ProtectSystem=strict` makes the whole file system read-only for the agent, and `ReadWritePaths` reopens only the state directory. The agent never writes to its working directory.
 
+Output spools live under `state_dir/spool`. Each output with an enabled spool can use up to its `max_size_mb` (default 256), so size the state volume for the sum of every spool plus the collector checkpoints. Spool files hold record data in plain text. The agent creates their directories with mode 0700 and files with mode 0600, and the state directory above is `webapi:webapi 0700`. Keep it that way on any platform. On Windows only SYSTEM, Administrators and `svc-webapi` should have access to `state`.
+
 ### Enable and Monitor
 
 ```bash
@@ -419,6 +421,7 @@ headers:
 - [ ] Every credential uses `api_key_env`, `api_password_env` or `value_env`.
 - [ ] The service's working directory is the folder that holds `config.yml`.
 - [ ] `state_dir` is an absolute path that the service account can write to.
+- [ ] If any output has a `spool`, `state_dir` is set, the volume has room for the sum of every `max_size_mb`, and only the service account can read `state_dir`.
 - [ ] `webapi-agent -check-config`, run with the service's environment, prints `configuration OK` before each restart.
 - [ ] The stop timeout is above 30 seconds (systemd `TimeoutStopSec`, default 90, or NSSM `AppStopMethodConsole`).
 - [ ] Linux: `webapi.env` is `root:root 0600`, `config.yml` is `root:webapi 0640`, and the state directory is `webapi:webapi 0700`.
