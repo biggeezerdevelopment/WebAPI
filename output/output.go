@@ -11,6 +11,7 @@ import (
 
 	"webapi/api"
 	"webapi/config"
+	"webapi/spool"
 )
 
 const (
@@ -73,7 +74,7 @@ func (r *retrying) Send(ctx context.Context, rec Record) error {
 		if err == nil {
 			return nil
 		}
-		if attempt > maxRetries || ctx.Err() != nil || errors.Is(err, ErrSyslogMessageTooLarge) || errors.Is(err, api.ErrRedirect) {
+		if attempt > maxRetries || ctx.Err() != nil || isPermanent(err) {
 			return fmt.Errorf("giving up after %d attempt(s): %w", attempt, err)
 		}
 
@@ -110,16 +111,19 @@ type queuedRecord struct {
 	rec Record
 }
 
-// Dispatcher delivers one source's records to its outputs. A single output is
-// called inline, which keeps the source paced by its destination. With several
-// outputs each has its own bounded queue and worker, so a slow or failed
-// output cannot delay another; when a queue is full the record is dropped for
-// that output and the drop is logged.
+// Dispatcher delivers one source's records to its outputs. A spooled output
+// is appended to inline, which is quick and never drops a record for a full
+// queue. Of the others, a single output is called inline, which keeps the
+// source paced by its destination. With several outputs each non-spooled one
+// has its own bounded queue and worker, so a slow or failed output cannot
+// delay another; when a queue is full the record is dropped for that output
+// and the drop is logged.
 type Dispatcher struct {
-	source  string
-	targets []target
-	queues  []chan queuedRecord
-	obs     DeliveryObserver
+	source string
+	inline []target
+	lanes  []target
+	queues []chan queuedRecord
+	obs    DeliveryObserver
 
 	mu     sync.RWMutex
 	closed bool
@@ -132,12 +136,16 @@ func newDispatcher(source string, targets []target, queueSize int) *Dispatcher {
 
 // newObservedDispatcher is newDispatcher with an optional observer.
 func newObservedDispatcher(source string, targets []target, queueSize int, obs DeliveryObserver) *Dispatcher {
-	d := &Dispatcher{source: source, targets: targets, obs: obs}
-	if len(targets) < 2 {
-		return d
+	d := &Dispatcher{source: source, obs: obs}
+	for _, t := range targets {
+		if isSpooled(t) || len(targets) < 2 {
+			d.inline = append(d.inline, t)
+		} else {
+			d.lanes = append(d.lanes, t)
+		}
 	}
-	d.queues = make([]chan queuedRecord, len(targets))
-	for i, t := range targets {
+	d.queues = make([]chan queuedRecord, len(d.lanes))
+	for i, t := range d.lanes {
 		queue := make(chan queuedRecord, queueSize)
 		d.queues[i] = queue
 		d.wg.Add(1)
@@ -154,31 +162,33 @@ func newObservedDispatcher(source string, targets []target, queueSize int, obs D
 // Deliver hands rec to every output. Failures are logged, not returned, because
 // delivery is best-effort for the polling source.
 func (d *Dispatcher) Deliver(ctx context.Context, rec Record) {
-	if len(d.targets) == 1 {
-		d.send(ctx, d.targets[0], rec)
+	for _, t := range d.inline {
+		d.send(ctx, t, rec)
+	}
+	if len(d.lanes) == 0 {
 		return
 	}
 
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.closed {
-		if len(d.targets) > 0 {
-			log.Printf("Dropping record from source %q: dispatcher is closed", d.source)
-		}
+		log.Printf("Dropping record from source %q: dispatcher is closed", d.source)
 		return
 	}
 	for i, queue := range d.queues {
 		select {
 		case queue <- queuedRecord{ctx: ctx, rec: rec}:
 		default:
-			log.Printf("Dropping record from source %q for output %q: queue is full", d.source, d.targets[i].name)
+			log.Printf("Dropping record from source %q for output %q: queue is full", d.source, d.lanes[i].name)
 			if d.obs != nil {
-				d.obs.DeliveryFailed(d.targets[i].name, ErrQueueFull)
+				d.obs.DeliveryFailed(d.lanes[i].name, ErrQueueFull)
 			}
 		}
 	}
 }
 
+// send delivers to one target. A successful spool append is not a delivery;
+// the spooler reports that when the record is sent.
 func (d *Dispatcher) send(ctx context.Context, t target, rec Record) {
 	err := t.out.Send(ctx, rec)
 	if err != nil {
@@ -189,7 +199,7 @@ func (d *Dispatcher) send(ctx context.Context, t target, rec Record) {
 	}
 	if err != nil {
 		d.obs.DeliveryFailed(t.name, err)
-	} else {
+	} else if !isSpooled(t) {
 		d.obs.Delivered(t.name)
 	}
 }
@@ -217,30 +227,143 @@ type Router struct {
 	// confirmedLogRemote replaces apilogremote in Routes. Its success means the
 	// body reached the configured URL, which checkpointing callers rely on.
 	confirmedLogRemote Output
+
+	// spools holds the spooled outputs by name; spoolList is the same in
+	// config order.
+	spools     map[string]*spooler
+	spoolList  []*spooler
+	stopSpools context.CancelFunc
+	spoolWG    sync.WaitGroup
+
+	obsMu     sync.Mutex
+	observers map[int]DeliveryObserver
+}
+
+// RouterOptions changes how NewRouterWithOptions builds a Router.
+type RouterOptions struct {
+	// ReadOnly opens no spool, so nothing is written to state_dir; spooled
+	// outputs are used directly. -check-config uses it.
+	ReadOnly bool
+
+	// Test hooks; zero values mean the defaults.
+	newOutput    func(*config.LogOutput) (Output, error)
+	retryBackoff time.Duration
+	spoolMinWait time.Duration
+	spoolMaxWait time.Duration
 }
 
 // NewRouter builds every enabled output from a validated configuration.
 func NewRouter(cfg *config.Config) (*Router, error) {
-	r := &Router{cfg: cfg, outputs: make(map[string]Output)}
+	return NewRouterWithOptions(cfg, RouterOptions{})
+}
+
+// NewRouterWithOptions is NewRouter with options. It opens the spool of every
+// spooled output and starts its worker; Close stops them.
+func NewRouterWithOptions(cfg *config.Config, opts RouterOptions) (*Router, error) {
+	if opts.newOutput == nil {
+		opts.newOutput = newConfiguredOutput
+	}
+	if opts.spoolMinWait <= 0 {
+		opts.spoolMinWait = defaultSpoolMinWait
+	}
+	if opts.spoolMaxWait <= 0 {
+		opts.spoolMaxWait = defaultSpoolMaxWait
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &Router{
+		cfg:        cfg,
+		outputs:    make(map[string]Output),
+		spools:     make(map[string]*spooler),
+		stopSpools: cancel,
+		observers:  make(map[int]DeliveryObserver),
+	}
+	wrap := func(out Output, timeout time.Duration) *retrying {
+		rt := newRetrying(out, timeout)
+		if opts.retryBackoff > 0 {
+			rt.backoff = opts.retryBackoff
+		}
+		return rt
+	}
 	if cfg.APILogRemote.Enabled {
 		client := api.NewLogClient(&cfg.APILogRemote)
 		timeout := time.Duration(cfg.APILogRemote.TimeoutSeconds()) * time.Second
-		r.outputs[config.APILogRemoteOutputName] = newRetrying(&logRemoteOutput{client: client}, timeout)
-		r.confirmedLogRemote = newRetrying(&logRemoteOutput{client: client.WithoutRedirects()}, timeout)
+		r.outputs[config.APILogRemoteOutputName] = wrap(&logRemoteOutput{client: client}, timeout)
+		r.confirmedLogRemote = wrap(&logRemoteOutput{client: client.WithoutRedirects()}, timeout)
+		if err := r.addSpool(ctx, opts, config.APILogRemoteOutputName, cfg.APILogRemote.Spool); err != nil {
+			_ = r.Close()
+			return nil, fmt.Errorf("apilogremote: %w", err)
+		}
 	}
 	for i := range cfg.LogOutputs {
 		entry := &cfg.LogOutputs[i]
 		if !entry.Enabled {
 			continue
 		}
-		out, err := newConfiguredOutput(entry)
+		out, err := opts.newOutput(entry)
+		if err == nil {
+			r.outputs[entry.Name] = wrap(out, time.Duration(entry.Timeout)*time.Second)
+			err = r.addSpool(ctx, opts, entry.Name, entry.Spool)
+		}
 		if err != nil {
 			_ = r.Close()
 			return nil, fmt.Errorf("logoutputs[%d] (name %q): %w", i, entry.Name, err)
 		}
-		r.outputs[entry.Name] = newRetrying(out, time.Duration(entry.Timeout)*time.Second)
 	}
 	return r, nil
+}
+
+// addSpool opens the named output's spool and starts its worker, unless the
+// spool is off or the router is read-only.
+func (r *Router) addSpool(ctx context.Context, opts RouterOptions, name string, cfg *config.Spool) error {
+	if opts.ReadOnly || !cfg.IsEnabled() {
+		return nil
+	}
+	sp, err := spool.Open(config.SpoolDir(r.cfg.StateDir, name), spool.Options{
+		Name:     name,
+		MaxBytes: cfg.MaxBytes(),
+		MaxAge:   cfg.MaxAge(),
+	})
+	if err != nil {
+		return fmt.Errorf("spool: %w", err)
+	}
+	s := &spooler{name: name, sp: sp, out: r.outputs[name], router: r, minWait: opts.spoolMinWait, maxWait: opts.spoolMaxWait}
+	r.spools[name] = s
+	r.spoolList = append(r.spoolList, s)
+	r.spoolWG.Add(1)
+	go func() {
+		defer r.spoolWG.Done()
+		s.run(ctx)
+	}()
+	return nil
+}
+
+// observer returns the observer registered for a source's config index.
+func (r *Router) observer(origin int) DeliveryObserver {
+	r.obsMu.Lock()
+	defer r.obsMu.Unlock()
+	return r.observers[origin]
+}
+
+// originOf returns source's index in the config, or -1 when source is not one
+// of its entries.
+func (r *Router) originOf(source *config.WebAPI) int {
+	for i := range r.cfg.WebAPI {
+		if &r.cfg.WebAPI[i] == source {
+			return i
+		}
+	}
+	return -1
+}
+
+// TakeSpoolStats returns each spool's state, apilogremote first and then in
+// config order, and resets their drop counts.
+func (r *Router) TakeSpoolStats() []SpoolStat {
+	stats := make([]SpoolStat, 0, len(r.spoolList))
+	for _, s := range r.spoolList {
+		st := s.sp.TakeStats()
+		stats = append(stats, SpoolStat{Output: s.name, Records: st.Records, Bytes: st.Bytes, Dropped: st.Dropped})
+	}
+	return stats
 }
 
 // newConfiguredOutput builds the output for a validated entry.
@@ -257,11 +380,24 @@ func (r *Router) Dispatcher(source *config.WebAPI) (*Dispatcher, error) {
 }
 
 // ObservedDispatcher is Dispatcher with an observer told each delivery's
-// outcome. obs may be nil.
+// outcome. obs may be nil. Spooled outputs are appended to, and their
+// deliveries are reported to obs when the spool worker sends them, provided
+// source is one of the router config's own entries.
 func (r *Router) ObservedDispatcher(source *config.WebAPI, obs DeliveryObserver) (*Dispatcher, error) {
 	routes, err := r.namedOutputs(source)
 	if err != nil {
 		return nil, err
+	}
+	origin := r.originOf(source)
+	if obs != nil && origin >= 0 {
+		r.obsMu.Lock()
+		r.observers[origin] = obs
+		r.obsMu.Unlock()
+	}
+	for i := range routes {
+		if s := r.spools[routes[i].Name]; s != nil {
+			routes[i].Output = &spoolAppender{s: s, origin: origin}
+		}
 	}
 	return r.dispatcherFor(source.Name, routes, obs), nil
 }
@@ -326,12 +462,21 @@ func (r *Router) outputsNamed(label string, names []string) ([]NamedOutput, erro
 	return routes, nil
 }
 
-// Close drains all dispatchers and then closes the outputs.
+// Close drains all dispatchers, stops the spool workers (a send in progress
+// is canceled and its record stays on disk), closes the spools and then the
+// outputs.
 func (r *Router) Close() error {
 	for _, d := range r.dispatchers {
 		d.Close()
 	}
+	r.stopSpools()
+	r.spoolWG.Wait()
 	var errs []error
+	for _, s := range r.spoolList {
+		if err := s.sp.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("output %q spool: %w", s.name, err))
+		}
+	}
 	for name, out := range r.outputs {
 		if err := out.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("output %q: %w", name, err))

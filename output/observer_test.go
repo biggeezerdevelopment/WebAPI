@@ -121,3 +121,9 @@ func TestHeartbeatDispatcher(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func (o *recordingObserver) counts(name string) (delivered, failed int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.delivered[name], len(o.failed[name])
+}
