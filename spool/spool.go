@@ -6,9 +6,11 @@ package spool
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -88,6 +90,9 @@ type Spool struct {
 	pending *pendingFrame
 	dropped int
 	closed  bool
+	// broken is set when a write to the active segment failed, which may
+	// have left stray bytes in it; the next Append starts a new segment.
+	broken bool
 
 	wake chan struct{}
 	done chan struct{}
@@ -110,6 +115,7 @@ func Open(dir string, opts Options) (*Spool, error) {
 	if segSize <= 0 {
 		segSize = max(min(int64(maxSegmentSize), opts.MaxBytes/4), 1)
 	}
+	segSize = min(segSize, opts.MaxBytes)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, errors.New("spool directory cannot be created")
 	}
@@ -204,13 +210,47 @@ func (s *Spool) loadSegment(seq uint64, last bool) (*segment, error) {
 	}
 	seg.frames = frames
 	if last && end < seg.size {
-		s.opts.Logf("Spool %s: removing a partial record at the end of segment %d", s.opts.Name, seq)
+		if lost, corrupt := s.middleCorruption(path, end, seg.size); corrupt {
+			s.opts.Logf("Spool %s: segment %d is corrupt; dropping its remaining %d record(s)", s.opts.Name, seq, lost)
+			s.dropped += lost
+		} else {
+			s.opts.Logf("Spool %s: removing a partial record at the end of segment %d", s.opts.Name, seq)
+		}
 		if err := os.Truncate(path, end); err != nil {
 			return nil, errors.New("spool segment cannot be repaired")
 		}
 		seg.size = end
 	}
 	return seg, nil
+}
+
+// middleCorruption reports whether the bad frame at off is damage in the
+// middle of the segment rather than a torn tail: its header is complete and
+// its declared extent ends before the end of the file. lost counts that frame
+// and the readable frame headers after it.
+func (s *Spool) middleCorruption(path string, off, size int64) (lost int, corrupt bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+	if size-off < headerSize {
+		return 0, false
+	}
+	var b [4]byte
+	if _, err := f.ReadAt(b[:], off); err != nil {
+		return 0, false
+	}
+	length := int64(binary.LittleEndian.Uint32(b[:]))
+	next := off + headerSize + length
+	if next >= size {
+		return 0, false
+	}
+	after, _, err := scan(f, next, size, false)
+	if err != nil {
+		after = 0
+	}
+	return 1 + after, true
 }
 
 func (s *Spool) listSegments() ([]uint64, error) {
@@ -252,7 +292,9 @@ func (s *Spool) createSegment(seq uint64) error {
 		_ = s.active.Close()
 	}
 	s.active = f
+	s.broken = false
 	s.segs = append(s.segs, &segment{seq: seq})
+	syncDir(s.dir)
 	return nil
 }
 
@@ -263,6 +305,9 @@ func (s *Spool) rotate() error {
 // Append writes payload durably, then drops the oldest segments while the
 // spool is over MaxBytes.
 func (s *Spool) Append(payload []byte) error {
+	if uint64(len(payload)) > math.MaxUint32 {
+		return ErrTooLarge
+	}
 	frame := encodeFrame(payload, s.opts.Now().UnixNano())
 	n := int64(len(frame))
 	s.mu.Lock()
@@ -274,18 +319,18 @@ func (s *Spool) Append(payload []byte) error {
 		return ErrTooLarge
 	}
 	last := s.segs[len(s.segs)-1]
-	if last.size > 0 && last.size+n > s.segSize {
+	if s.broken || (last.size > 0 && last.size+n > s.segSize) {
 		if err := s.rotate(); err != nil {
 			return err
 		}
 		last = s.segs[len(s.segs)-1]
 	}
 	if _, err := s.active.Write(frame); err != nil {
-		_ = s.active.Truncate(last.size)
+		s.writeFailed(last.seq, last.size)
 		return errors.New("spool write failed")
 	}
 	if err := s.active.Sync(); err != nil {
-		_ = s.active.Truncate(last.size)
+		s.writeFailed(last.seq, last.size)
 		return errors.New("spool write failed")
 	}
 	last.size += n
@@ -296,6 +341,15 @@ func (s *Spool) Append(payload []byte) error {
 	default:
 	}
 	return nil
+}
+
+// writeFailed handles a failed write or sync: the segment may now hold bytes
+// beyond size, so no more frames go into it. Cutting it back through the path
+// is best effort (it works on Windows, where the append handle cannot); reads
+// are capped at the in-memory size either way.
+func (s *Spool) writeFailed(seq uint64, size int64) {
+	s.broken = true
+	_ = os.Truncate(s.segPath(seq), size)
 }
 
 func (s *Spool) totalBytes() int64 {
