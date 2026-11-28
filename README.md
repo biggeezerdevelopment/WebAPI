@@ -163,11 +163,15 @@ logoutputs:
 **Spool.** Any `logoutputs` entry, and `apilogremote`, can have a `spool` block that queues records on disk until the output accepts them. Only plain sources are spooled. Collectors (which have their own checkpoints) and heartbeats bypass the spool.
 
 - An enabled spool requires `state_dir`. Without it startup fails with `spool requires state_dir`. The limits are validated even when `enabled` is `false`.
+- A `spool` block with no `enabled` key leaves spooling off, and startup logs `output "<name>" has a spool block with no "enabled" key; spooling is off` (also shown by `-check-config`). Set `enabled: true` to spool.
 - Each spool is a directory `<state_dir>/spool/output-<hash>`, where the hash is derived from the output name.
-- Renaming an output, or disabling its spool, leaves its backlog in `<state_dir>/spool/output-<hash>` unsent. That backlog holds plaintext record data, so remove the directory yourself.
+- Renaming or disabling an output, or disabling its spool, leaves its backlog in `<state_dir>/spool/output-<hash>` unsent. That backlog holds plaintext record data. Remove such directories with `-purge-spools` (see Running). It treats the spool of a disabled output, or of an output whose spool is off, as stale, so any unsent records in it are deleted. Run it only while the agent is stopped, or after the agent was restarted with the current config.
 - Files are split into segments of at most 8 MiB, and no more than a quarter of `max_size_mb`. When the spool is full, the oldest whole segments are dropped. Records older than `max_age_hours` are dropped when they are read, and records in a corrupt segment are dropped. Each drop is logged and counted in the heartbeat.
 - A record larger than `max_size_mb` cannot be spooled. It is logged, counted as a delivery failure, and lost for that output.
 - Spool files hold record data in plain text. The agent creates directories with mode 0700 and files with mode 0600. Restrict access to `state_dir`.
+- If the read position cannot be saved to the `ack` file, as on a full disk, the spool keeps delivering and keeps enforcing its size limit. The position moves in memory, and the `ack` file can lag behind it. After a crash the agent sends records again but never skips any. The failure is logged once for each run of failures.
+- At startup, if the `ack` file names a segment that is missing or was already removed, the agent resumes at the next segment that exists. When the missing segment lies between existing ones it logs a warning. An `ack` file that points past the last segment still stops startup.
+- In the heartbeat, each spooled record is credited to the source that produced it. A source is identified by its name, subject, endpoint and method, so reordering `webapi` entries does not misattribute records. A record left by an older version, or one whose source no longer exists or is ambiguous, is still delivered. Its failures are reported to every source routed to that output, and its success is credited to no source. Two enabled sources with the same name, subject, endpoint and method get a startup warning, and neither is credited.
 
 ### Heartbeat
 
@@ -271,7 +275,7 @@ heartbeat:
 
 **What counts as a delivery.**
 
-- **Plain entries:** each record sent to an output is a delivery or a failure. A record dropped because that output's queue was full counts as a failure.
+- **Plain entries:** each record sent to an output is a delivery or a failure. A record dropped because that output's queue was full counts as a failure. For a spooled output, a record that matches no single source counts as a failure for every source routed to that output, and its success counts for none (see Spool).
 - **Collectors:** each delivered event counts as a delivery and updates `checkpoint`. A failed batch counts as one failure.
 - Work interrupted by shutdown is never counted as an error or a failure.
 
@@ -482,6 +486,7 @@ The agent reads `config.yml` from its working directory. Command-line flags:
 - `-config <path>` reads another file. A relative path, like a relative `state_dir`, resolves against the working directory, not the config file's folder.
 - `-check-config` loads and validates the config, prints warnings, builds the outputs, collectors and heartbeat, and exits without polling. It exits 0 and prints `configuration OK` when the config is valid, 1 on an error, and 2 on a usage error. It validates `spool` blocks and never writes checkpoint or spool files, but like a normal start it creates `state_dir` if missing and checks that it is writable.
 - `-version` prints `webapi-agent <version>` and exits 0 without loading the config. The version is `dev` unless it was set at build time (see Building).
+- `-purge-spools` loads and validates the config, prints warnings, removes every `<state_dir>/spool/output-*` directory that no enabled spooled output uses, and exits without polling. It prints `removed <dir> (<n> bytes)` for each directory, then a summary, or `no stale spool directories`. It requires `state_dir` and exits 1 on an error, such as a failed removal. Combined with `-check-config` it is a usage error (exit code 2). Spools of outputs that are disabled, or whose spool is off, count as stale, so purging deletes any unsent records in them. Run it only while the agent is stopped, or after the agent has been restarted with the current config.
 
 ```bash
 ./webapi-agent -config /etc/webapi/config.yml -check-config
@@ -506,7 +511,7 @@ The agent stops gracefully on SIGINT or SIGTERM (see Error Handling). To run it 
 - Configurable request intervals and timeouts
 - Heartbeat with per-source poll and delivery status
 - Graceful shutdown on SIGINT or SIGTERM, bounded at 30 seconds
-- `-config`, `-check-config` and `-version` command-line flags
+- `-config`, `-check-config`, `-version` and `-purge-spools` command-line flags
 - CI on Linux and Windows, and release binaries with SHA256 checksums for `v*` tags
 
 ## Project Structure
