@@ -93,6 +93,11 @@ type Spool struct {
 	// broken is set when a write to the active segment failed, which may
 	// have left stray bytes in it; the next Append starts a new segment.
 	broken bool
+	// writeAckFn saves the read position. It is writeAck except in tests,
+	// which replace it to make saves fail on every platform.
+	writeAckFn func(dir string, p position) error
+	// ackFailing is set while saves of the read position fail.
+	ackFailing bool
 
 	wake chan struct{}
 	done chan struct{}
@@ -119,7 +124,7 @@ func Open(dir string, opts Options) (*Spool, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, errors.New("spool directory cannot be created")
 	}
-	s := &Spool{dir: dir, opts: opts, segSize: segSize, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	s := &Spool{dir: dir, opts: opts, segSize: segSize, writeAckFn: writeAck, wake: make(chan struct{}, 1), done: make(chan struct{})}
 	if err := s.load(); err != nil {
 		_ = s.closeFiles()
 		return nil, err
@@ -303,6 +308,13 @@ func (s *Spool) segPath(seq uint64) string {
 	return filepath.Join(s.dir, fmt.Sprintf("%016d%s", seq, segmentSuffix))
 }
 
+// persist saves p as the read position and notes whether saves are failing.
+func (s *Spool) persist(p position) error {
+	err := s.writeAckFn(s.dir, p)
+	s.ackFailing = err != nil
+	return err
+}
+
 // createSegment starts segment seq and makes it the one appended to.
 func (s *Spool) createSegment(seq uint64) error {
 	f, err := os.OpenFile(s.segPath(seq), os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_EXCL, 0o600)
@@ -388,7 +400,7 @@ func (s *Spool) enforceSize() {
 	dropped := 0
 	for s.totalBytes() > s.opts.MaxBytes && len(s.segs) > 1 {
 		next := position{Seq: s.segs[1].seq}
-		if err := writeAck(s.dir, next); err != nil {
+		if err := s.persist(next); err != nil {
 			s.opts.Logf("Spool %s: over its size limit, but the read position cannot be saved: %v", s.opts.Name, err)
 			break
 		}
@@ -421,7 +433,7 @@ func (s *Spool) removeOldest() {
 // current one.
 func (s *Spool) finishSegment() error {
 	next := position{Seq: s.segs[1].seq}
-	if err := writeAck(s.dir, next); err != nil {
+	if err := s.persist(next); err != nil {
 		return err
 	}
 	s.pos = next
@@ -498,7 +510,7 @@ func (s *Spool) next() (payload []byte, ok bool, err error) {
 		}
 		next := s.pos.Off + headerSize + int64(len(payload))
 		if s.opts.MaxAge > 0 && s.opts.Now().Sub(time.Unix(0, at)) > s.opts.MaxAge {
-			if err := writeAck(s.dir, position{Seq: seg.seq, Off: next}); err != nil {
+			if err := s.persist(position{Seq: seg.seq, Off: next}); err != nil {
 				return nil, false, err
 			}
 			s.pos.Off = next
@@ -549,7 +561,7 @@ func (s *Spool) Ack() error {
 	// write past it succeeded).
 	s.pos = position{Seq: p.at.Seq, Off: p.next}
 	s.segs[0].frames--
-	return writeAck(s.dir, s.pos)
+	return s.persist(s.pos)
 }
 
 // TakeStats returns the spool's state and resets Dropped.

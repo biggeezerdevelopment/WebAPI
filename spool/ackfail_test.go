@@ -1,30 +1,37 @@
 package spool
 
 import (
-	"os"
-	"runtime"
+	"errors"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// denyWrites makes dir read-only until the test ends, so writeAck fails.
-func denyWrites(t *testing.T, dir string) {
-	t.Helper()
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("directory permissions are not enforced here")
+// ackSwitch makes a spool's ack writes fail while on is true.
+type ackSwitch struct{ on atomic.Bool }
+
+// failAcks makes s's ack writes fail until the returned switch is turned off.
+// It works on every platform, unlike directory permissions.
+func failAcks(s *Spool) *ackSwitch {
+	sw := &ackSwitch{}
+	sw.on.Store(true)
+	s.mu.Lock()
+	s.writeAckFn = func(dir string, p position) error {
+		if sw.on.Load() {
+			return errors.New("injected ack failure")
+		}
+		return writeAck(dir, p)
 	}
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	s.mu.Unlock()
+	return sw
 }
 
 func TestAckFailureStillAdvancesInMemory(t *testing.T) {
 	dir := t.TempDir()
 	s := openTest(t, dir, Options{})
 	mustAppend(t, s, "a", "b", "c")
-	denyWrites(t, dir)
+	sw := failAcks(s)
 
 	var got []string
 	for range 3 {
@@ -34,7 +41,7 @@ func TestAckFailureStillAdvancesInMemory(t *testing.T) {
 		}
 		got = append(got, p)
 		if err := s.Ack(); err == nil {
-			t.Fatal("Ack succeeded in a read-only directory")
+			t.Fatal("Ack succeeded while ack writes fail")
 		}
 	}
 	if !slices.Equal(got, []string{"a", "b", "c"}) {
@@ -44,9 +51,7 @@ func TestAckFailureStillAdvancesInMemory(t *testing.T) {
 		t.Fatalf("Records = %d", st.Records)
 	}
 	// Once writes work again, a later ack persists the newer position.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	sw.on.Store(false)
 	mustAppend(t, s, "d")
 	if got := drain(t, s); !slices.Equal(got, []string{"d"}) {
 		t.Fatalf("after recovery got %q", got)
