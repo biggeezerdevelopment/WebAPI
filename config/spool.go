@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -31,6 +33,47 @@ type Spool struct {
 	// MaxAgeHours drops records older than this many hours. nil means the
 	// default and 0 means records never expire.
 	MaxAgeHours *int `yaml:"max_age_hours"`
+
+	// enabledSet records that the YAML block had an enabled key, so a block
+	// that leaves it out can be warned about.
+	enabledSet bool
+}
+
+// UnmarshalYAML decodes the block and notes whether it set enabled.
+func (s *Spool) UnmarshalYAML(value *yaml.Node) error {
+	type plain Spool
+	if err := value.Decode((*plain)(s)); err != nil {
+		return err
+	}
+	s.enabledSet = false
+	if value.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			if value.Content[i].Value == "enabled" {
+				s.enabledSet = true
+			}
+		}
+	}
+	return nil
+}
+
+// spoolWarnings flags enabled outputs whose spool block has no enabled key,
+// which leaves spooling off.
+func (c *Config) spoolWarnings() []string {
+	var warnings []string
+	check := func(name string, sp *Spool) {
+		if sp != nil && !sp.Enabled && !sp.enabledSet {
+			warnings = append(warnings, fmt.Sprintf("output %q has a spool block with no \"enabled\" key; spooling is off", name))
+		}
+	}
+	if c.APILogRemote.Enabled {
+		check(APILogRemoteOutputName, c.APILogRemote.Spool)
+	}
+	for i := range c.LogOutputs {
+		if c.LogOutputs[i].Enabled {
+			check(c.LogOutputs[i].Name, c.LogOutputs[i].Spool)
+		}
+	}
+	return warnings
 }
 
 // IsEnabled reports whether s is set and enabled.

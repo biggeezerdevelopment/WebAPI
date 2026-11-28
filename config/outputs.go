@@ -295,6 +295,7 @@ func (c *Config) OutputWarnings() []string {
 			warnings = append(warnings, fmt.Sprintf("log output %q has TLS verification disabled (skip_verify: true)", entry.Name))
 		}
 	}
+	warnings = append(warnings, c.spoolWarnings()...)
 	warnings = append(warnings, c.sourceWarnings()...)
 	warnings = append(warnings, c.collectorWarnings()...)
 	return append(warnings, c.heartbeatWarnings()...)

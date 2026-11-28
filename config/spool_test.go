@@ -137,3 +137,66 @@ func TestSpoolDirHashesName(t *testing.T) {
 		t.Fatalf("SpoolDir a=%q b=%q", a, b)
 	}
 }
+
+func hasWarning(warnings []string, sub string) bool {
+	for _, w := range warnings {
+		if strings.Contains(w, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+const missingEnabledWarning = `output "hook" has a spool block with no "enabled" key; spooling is off`
+
+func decodeSpool(t *testing.T, text string) *Spool {
+	t.Helper()
+	var out LogOutput
+	if err := yaml.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Spool
+}
+
+func TestSpoolWarningForMissingEnabledKey(t *testing.T) {
+	cases := map[string]struct {
+		yaml string
+		want bool
+	}{
+		"no enabled key": {"spool:\n  max_size_mb: 10\n", true},
+		"empty block":    {"spool: {}\n", true},
+		"enabled false":  {"spool:\n  enabled: false\n", false},
+		"enabled true":   {"spool:\n  enabled: true\n", false},
+		"no block":       {"name: hook\n", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := spoolConfig(t.TempDir(), decodeSpool(t, tc.yaml))
+			if got := hasWarning(cfg.OutputWarnings(), missingEnabledWarning); got != tc.want {
+				t.Fatalf("warning = %v, want %v; warnings = %q", got, tc.want, cfg.OutputWarnings())
+			}
+		})
+	}
+}
+
+func TestSpoolWarningSkipsDisabledOutput(t *testing.T) {
+	cfg := spoolConfig(t.TempDir(), decodeSpool(t, "spool:\n  max_size_mb: 10\n"))
+	cfg.LogOutputs[0].Enabled = false
+	if hasWarning(cfg.OutputWarnings(), "spool block") {
+		t.Fatalf("warned for a disabled output: %q", cfg.OutputWarnings())
+	}
+}
+
+func TestSpoolWarningForAPILogRemote(t *testing.T) {
+	cfg := &Config{APILogRemote: APILogRemote{Enabled: true, Spool: decodeSpool(t, "spool:\n  max_age_hours: 1\n")}}
+	if !hasWarning(cfg.OutputWarnings(), `output "apilogremote" has a spool block with no "enabled" key`) {
+		t.Fatalf("warnings = %q", cfg.OutputWarnings())
+	}
+}
+
+func TestSpoolLimitsStillDecodeWithPresenceCheck(t *testing.T) {
+	sp := decodeSpool(t, "spool:\n  enabled: true\n  max_size_mb: 7\n  max_age_hours: 0\n")
+	if !sp.IsEnabled() || sp.MaxBytes() != 7<<20 || sp.MaxAge() != 0 {
+		t.Fatalf("spool = %+v", sp)
+	}
+}
