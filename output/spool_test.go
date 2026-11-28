@@ -2,6 +2,7 @@ package output
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"webapi/config"
+	"webapi/spool"
 )
 
 // sink is a fake output that can be taken down and records what it accepted.
@@ -320,5 +322,120 @@ func TestRouterCloseDuringBlockedSendKeepsRecord(t *testing.T) {
 	waitFor(t, "redelivery", func() bool { _, got := s.state(); return len(got) == 1 })
 	if _, got := s.state(); got[0] != `{"n":7}` {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func spoolSourcesRouter(t *testing.T, dir string, s *sink, sources ...config.WebAPI) (*Router, *config.Config) {
+	t.Helper()
+	cfg := &config.Config{StateDir: dir, LogOutputs: []config.LogOutput{spooledOutputConfig("hook")}, WebAPI: sources}
+	return testRouter(t, cfg, false, map[string]Output{"hook": funcOutput{send: s.send}}), cfg
+}
+
+func TestSourceKeyIgnoresSpacingAndMethodCase(t *testing.T) {
+	a := sourceKey(&config.WebAPI{Name: " a ", Endpoint: "https://x.example", Method: "GET"})
+	b := sourceKey(&config.WebAPI{Name: "a", Endpoint: "https://x.example", Method: "get"})
+	if a != b || len(a) != 32 {
+		t.Fatalf("keys %q and %q", a, b)
+	}
+	if a == sourceKey(&config.WebAPI{Name: "a", Endpoint: "https://y.example", Method: "get"}) {
+		t.Fatal("different endpoints share a key")
+	}
+}
+
+func TestSpoolCreditsSourceAfterReorder(t *testing.T) {
+	dir := t.TempDir()
+	a := config.WebAPI{Enabled: true, Name: "a", Endpoint: "https://a.example/x", Method: "get"}
+	b := config.WebAPI{Enabled: true, Name: "b", Endpoint: "https://b.example/x", Method: "get"}
+	s := &sink{down: true}
+	r1, cfg1 := spoolSourcesRouter(t, dir, s, a, b)
+	d, _ := r1.ObservedDispatcher(&cfg1.WebAPI[0], newRecordingObserver())
+	d.Deliver(context.Background(), numbered(0))
+	waitFor(t, "a failed attempt", func() bool { n, _ := s.state(); return n >= 1 })
+	if err := r1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	r2, cfg2 := spoolSourcesRouter(t, dir, s, b, a) // reordered; a is now index 1
+	defer r2.Close()
+	obsB, obsA := newRecordingObserver(), newRecordingObserver()
+	if _, err := r2.ObservedDispatcher(&cfg2.WebAPI[0], obsB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r2.ObservedDispatcher(&cfg2.WebAPI[1], obsA); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "a failure credited to a", func() bool { _, f := obsA.counts("hook"); return f >= 1 })
+	s.setDown(false)
+	waitFor(t, "a delivery credited to a", func() bool { n, _ := obsA.counts("hook"); return n == 1 })
+	if n, f := obsB.counts("hook"); n != 0 || f != 0 {
+		t.Fatalf("b credited with %d deliveries and %d failures that belong to a", n, f)
+	}
+}
+
+func TestSpoolUnkeyedItemFailuresReachEveryRoutedSource(t *testing.T) {
+	dir := t.TempDir()
+	// An item written by an older version: an origin index but no source key.
+	sp, err := spool.Open(config.SpoolDir(dir, "hook"), spool.Options{Name: "hook", MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := json.Marshal(map[string]any{"origin": 0, "record": numbered(0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Append(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &sink{down: true}
+	r, cfg := spoolSourcesRouter(t, dir, s, config.WebAPI{Enabled: true, Name: "a"}, config.WebAPI{Enabled: true, Name: "b"})
+	defer r.Close()
+	obsA, obsB := newRecordingObserver(), newRecordingObserver()
+	dA, _ := r.ObservedDispatcher(&cfg.WebAPI[0], obsA)
+	if _, err := r.ObservedDispatcher(&cfg.WebAPI[1], obsB); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "failures for both sources", func() bool {
+		_, fa := obsA.counts("hook")
+		_, fb := obsB.counts("hook")
+		return fa >= 1 && fb >= 1
+	})
+	s.setDown(false)
+	dA.Deliver(context.Background(), numbered(1))
+	waitFor(t, "a's own record", func() bool { n, _ := obsA.counts("hook"); return n == 1 })
+	if _, got := s.state(); !slices.Equal(got, numberedData(0, 2)) {
+		t.Fatalf("got %q", got)
+	}
+	if n, _ := obsB.counts("hook"); n != 0 {
+		t.Fatalf("b credited with %d deliveries", n)
+	}
+}
+
+func TestSpoolDuplicateSourceKeysCreditNoSource(t *testing.T) {
+	twin := config.WebAPI{Enabled: true, Name: "same", Endpoint: "https://x.example", Method: "get"}
+	s := &sink{down: true}
+	r, cfg := spoolSourcesRouter(t, t.TempDir(), s, twin, twin)
+	defer r.Close()
+	obs1, obs2 := newRecordingObserver(), newRecordingObserver()
+	d1, _ := r.ObservedDispatcher(&cfg.WebAPI[0], obs1)
+	if _, err := r.ObservedDispatcher(&cfg.WebAPI[1], obs2); err != nil {
+		t.Fatal(err)
+	}
+	d1.Deliver(context.Background(), numbered(0))
+	waitFor(t, "failures for both twins", func() bool {
+		_, f1 := obs1.counts("hook")
+		_, f2 := obs2.counts("hook")
+		return f1 >= 1 && f2 >= 1
+	})
+	s.setDown(false)
+	waitFor(t, "delivery", func() bool { _, got := s.state(); return len(got) == 1 })
+	time.Sleep(50 * time.Millisecond) // the success callback follows the send
+	n1, _ := obs1.counts("hook")
+	n2, _ := obs2.counts("hook")
+	if n1 != 0 || n2 != 0 {
+		t.Fatalf("deliveries credited: %d and %d", n1, n2)
 	}
 }

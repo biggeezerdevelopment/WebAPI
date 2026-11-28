@@ -235,8 +235,11 @@ type Router struct {
 	stopSpools context.CancelFunc
 	spoolWG    sync.WaitGroup
 
-	obsMu     sync.Mutex
-	observers map[int]DeliveryObserver
+	obsMu sync.Mutex
+	// observers holds each plain source's observer by source key; dupKeys
+	// are keys that more than one source has, which credit no source.
+	observers map[string]DeliveryObserver
+	dupKeys   map[string]bool
 }
 
 // RouterOptions changes how NewRouterWithOptions builds a Router.
@@ -275,7 +278,8 @@ func NewRouterWithOptions(cfg *config.Config, opts RouterOptions) (*Router, erro
 		outputs:    make(map[string]Output),
 		spools:     make(map[string]*spooler),
 		stopSpools: cancel,
-		observers:  make(map[int]DeliveryObserver),
+		observers:  make(map[string]DeliveryObserver),
+		dupKeys:    make(map[string]bool),
 	}
 	wrap := func(out Output, timeout time.Duration) *retrying {
 		rt := newRetrying(out, timeout)
@@ -337,13 +341,6 @@ func (r *Router) addSpool(ctx context.Context, opts RouterOptions, name string, 
 	return nil
 }
 
-// observer returns the observer registered for a source's config index.
-func (r *Router) observer(origin int) DeliveryObserver {
-	r.obsMu.Lock()
-	defer r.obsMu.Unlock()
-	return r.observers[origin]
-}
-
 // originOf returns source's index in the config, or -1 when source is not one
 // of its entries.
 func (r *Router) originOf(source *config.WebAPI) int {
@@ -381,23 +378,25 @@ func (r *Router) Dispatcher(source *config.WebAPI) (*Dispatcher, error) {
 
 // ObservedDispatcher is Dispatcher with an observer told each delivery's
 // outcome. obs may be nil. Spooled outputs are appended to, and their
-// deliveries are reported to obs when the spool worker sends them, provided
-// source is one of the router config's own entries.
+// deliveries are reported to obs when the spool worker sends them. The
+// source is identified by sourceKey, so records left on disk are credited
+// to the right source after the config is reordered.
 func (r *Router) ObservedDispatcher(source *config.WebAPI, obs DeliveryObserver) (*Dispatcher, error) {
 	routes, err := r.namedOutputs(source)
 	if err != nil {
 		return nil, err
 	}
 	origin := r.originOf(source)
-	if obs != nil && origin >= 0 {
-		r.obsMu.Lock()
-		r.observers[origin] = obs
-		r.obsMu.Unlock()
-	}
+	key := sourceKey(source)
+	var spooled []*spooler
 	for i := range routes {
 		if s := r.spools[routes[i].Name]; s != nil {
-			routes[i].Output = &spoolAppender{s: s, origin: origin}
+			spooled = append(spooled, s)
+			routes[i].Output = &spoolAppender{s: s, origin: origin, key: key}
 		}
+	}
+	if obs != nil {
+		r.register(key, source.Name, obs, spooled)
 	}
 	return r.dispatcherFor(source.Name, routes, obs), nil
 }

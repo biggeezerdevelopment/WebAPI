@@ -2,13 +2,18 @@ package output
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"slices"
+	"strings"
 	"time"
 
 	"webapi/api"
+	"webapi/config"
 	"webapi/spool"
 )
 
@@ -33,12 +38,31 @@ func isPermanent(err error) bool {
 	return errors.Is(err, ErrSyslogMessageTooLarge) || errors.Is(err, api.ErrRedirect)
 }
 
-// spoolItem is what one spool frame holds. Origin is the config index of the
-// plain source that appended it, or -1, and selects the observer told about
-// its delivery.
+// spoolItem is what one spool frame holds. SourceKey identifies the plain
+// source that appended it and selects the observer told about its delivery.
+// Origin, the source's config index, is still written so an older version
+// can read the spool, but it is no longer used: it changes when sources are
+// reordered.
 type spoolItem struct {
-	Origin int    `json:"origin"`
-	Record Record `json:"record"`
+	Origin    int    `json:"origin"`
+	SourceKey string `json:"source_key,omitempty"`
+	Record    Record `json:"record"`
+}
+
+// sourceKey identifies a plain source across restarts and config edits by
+// its name, subject, endpoint and method.
+func sourceKey(src *config.WebAPI) string {
+	h := sha256.New()
+	for _, part := range []string{
+		strings.TrimSpace(src.Name),
+		strings.TrimSpace(src.Subject),
+		strings.TrimSpace(src.Endpoint),
+		strings.ToLower(strings.TrimSpace(src.Method)),
+	} {
+		h.Write([]byte(part))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)[:16])
 }
 
 // spooler owns one output's spool and the worker that empties it in order.
@@ -52,10 +76,13 @@ type spooler struct {
 	// ackFailing is true after an ack failure until an ack succeeds. Only the
 	// worker goroutine uses it.
 	ackFailing bool
+	// routed holds the observers of the sources routed to this output. It is
+	// guarded by router.obsMu.
+	routed []DeliveryObserver
 }
 
-func (s *spooler) append(origin int, rec Record) error {
-	payload, err := json.Marshal(spoolItem{Origin: origin, Record: rec})
+func (s *spooler) append(origin int, key string, rec Record) error {
+	payload, err := json.Marshal(spoolItem{Origin: origin, SourceKey: key, Record: rec})
 	if err != nil {
 		return fmt.Errorf("spool: %w", err)
 	}
@@ -94,7 +121,7 @@ func (s *spooler) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		obs := s.router.observer(item.Origin)
+		obs := s.router.observer(item.SourceKey)
 		if err == nil {
 			s.ack()
 			wait = 0
@@ -104,9 +131,7 @@ func (s *spooler) run(ctx context.Context) {
 			continue
 		}
 		log.Printf("Error delivering spooled record from source %q to output %q: %v", item.Record.Source, s.name, err)
-		if obs != nil {
-			obs.DeliveryFailed(s.name, err)
-		}
+		s.reportFailure(obs, err)
 		if isPermanent(err) {
 			s.ack()
 			wait = 0
@@ -117,6 +142,57 @@ func (s *spooler) run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// reportFailure tells the item's source about a failed send. An item that
+// matches no single source (written by an older version, or by a source that
+// is gone or ambiguous) is reported to every source routed to this output, so
+// that a failing output is never hidden from the heartbeat.
+func (s *spooler) reportFailure(obs DeliveryObserver, err error) {
+	if obs != nil {
+		obs.DeliveryFailed(s.name, err)
+		return
+	}
+	for _, o := range s.router.routedTo(s) {
+		o.DeliveryFailed(s.name, err)
+	}
+}
+
+// register records obs as the observer for key, and as routed to each of
+// spools. A key that a second source also has credits neither of them.
+func (r *Router) register(key, name string, obs DeliveryObserver, spools []*spooler) {
+	r.obsMu.Lock()
+	defer r.obsMu.Unlock()
+	for _, s := range spools {
+		s.routed = append(s.routed, obs)
+	}
+	if r.dupKeys[key] {
+		return
+	}
+	if prev, ok := r.observers[key]; ok && prev != obs {
+		delete(r.observers, key)
+		r.dupKeys[key] = true
+		log.Printf("WARNING: more than one source named %q has the same subject, endpoint and method; their spooled deliveries are not credited to either", name)
+		return
+	}
+	r.observers[key] = obs
+}
+
+// observer returns the observer for a source key, if exactly one source has it.
+func (r *Router) observer(key string) DeliveryObserver {
+	if key == "" {
+		return nil
+	}
+	r.obsMu.Lock()
+	defer r.obsMu.Unlock()
+	return r.observers[key]
+}
+
+// routedTo returns the observers of the sources routed to s.
+func (r *Router) routedTo(s *spooler) []DeliveryObserver {
+	r.obsMu.Lock()
+	defer r.obsMu.Unlock()
+	return slices.Clone(s.routed)
 }
 
 // ack acknowledges the current record. A failure is logged once per streak of
@@ -159,9 +235,12 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 type spoolAppender struct {
 	s      *spooler
 	origin int
+	key    string
 }
 
-func (a *spoolAppender) Send(_ context.Context, rec Record) error { return a.s.append(a.origin, rec) }
+func (a *spoolAppender) Send(_ context.Context, rec Record) error {
+	return a.s.append(a.origin, a.key, rec)
+}
 
 func (a *spoolAppender) Close() error { return nil }
 
