@@ -200,3 +200,24 @@ func TestAckFailureRunsAreEachLogged(t *testing.T) {
 		t.Fatalf("%d failure lines, want 2: %q", n, lines)
 	}
 }
+
+func TestExpiredRecordsSaveReadPositionOnce(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	s := openTest(t, t.TempDir(), Options{MaxAge: time.Hour, Now: func() time.Time { return now }})
+	mustAppend(t, s, "a", "b", "c", "d", "e")
+	now = now.Add(2 * time.Hour)
+	mustAppend(t, s, "fresh")
+	var writes atomic.Int32
+	s.mu.Lock()
+	s.writeAckFn = func(dir string, p position) error {
+		writes.Add(1)
+		return writeAck(dir, p)
+	}
+	s.mu.Unlock()
+	if p, err := peekWithin(t, s, time.Second); err != nil || p != "fresh" {
+		t.Fatalf("Peek = %q, %v", p, err)
+	}
+	if n := writes.Load(); n != 1 {
+		t.Fatalf("ack writes during Peek = %d, want 1", n)
+	}
+}

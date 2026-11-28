@@ -334,6 +334,9 @@ func (r *Router) addSpool(ctx context.Context, opts RouterOptions, name string, 
 	r.spools[name] = s
 	r.spoolList = append(r.spoolList, s)
 	r.spoolWG.Add(1)
+	// Workers start before ObservedDispatcher registers observers, so backlog
+	// sent in that window is credited to no source and its failures reach only
+	// sources already registered. That affects heartbeat attribution, never delivery.
 	go func() {
 		defer r.spoolWG.Done()
 		s.run(ctx)
@@ -395,7 +398,7 @@ func (r *Router) ObservedDispatcher(source *config.WebAPI, obs DeliveryObserver)
 			routes[i].Output = &spoolAppender{s: s, origin: origin, key: key}
 		}
 	}
-	if obs != nil {
+	if obs != nil && len(spooled) > 0 {
 		r.register(key, source.Name, obs, spooled)
 	}
 	return r.dispatcherFor(source.Name, routes, obs), nil

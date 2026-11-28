@@ -162,7 +162,7 @@ func (s *Spool) load() error {
 					break
 				}
 			}
-			s.opts.Logf("Spool %s: the saved read position names missing segment %d; resuming at segment %d", s.opts.Name, pos.Seq, resume)
+			s.opts.Logf("WARNING: Spool %s: the saved read position names missing segment %d; resuming at segment %d", s.opts.Name, pos.Seq, resume)
 			pos = position{Seq: resume}
 		}
 	}
@@ -504,6 +504,9 @@ func (s *Spool) next() (payload []byte, ok bool, err error) {
 	defer func() {
 		if expired > 0 {
 			s.dropped += expired
+			// One save for the whole run of expired frames; the in-memory
+			// position already moved, so a failed save only lags the disk.
+			s.persistQuiet(s.pos)
 			s.opts.Logf("Spool %s: dropped %d record(s) (age limit)", s.opts.Name, expired)
 		}
 	}()
@@ -541,7 +544,6 @@ func (s *Spool) next() (payload []byte, ok bool, err error) {
 			s.pos.Off = next
 			seg.frames--
 			expired++
-			s.persistQuiet(s.pos)
 			continue
 		}
 		s.pending = &pendingFrame{at: s.pos, next: next}

@@ -157,7 +157,8 @@ func (s *spooler) reportFailure(obs DeliveryObserver, err error) {
 }
 
 // register records obs as the observer for key, and as routed to each of
-// spools. A key that a second source also has credits neither of them.
+// spools. Observers are compared with != and slices.Contains, so they must be
+// comparable types, such as pointers. A key that a second source also has credits neither of them.
 func (r *Router) register(key, name string, obs DeliveryObserver, spools []*spooler) {
 	r.obsMu.Lock()
 	defer r.obsMu.Unlock()

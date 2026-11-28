@@ -450,3 +450,20 @@ func TestSpoolDuplicateSourceKeysCreditNoSource(t *testing.T) {
 		t.Fatalf("deliveries credited: %d and %d", n1, n2)
 	}
 }
+
+func TestDuplicateSourcesWithoutSpoolRecordNoDuplicateKey(t *testing.T) {
+	twin := config.WebAPI{Enabled: true, Name: "same", Endpoint: "https://x.example", Method: "get"}
+	plain := config.LogOutput{Name: "hook", Enabled: true, Type: config.OutputTypeWebhook, Timeout: 1}
+	cfg := &config.Config{StateDir: t.TempDir(), LogOutputs: []config.LogOutput{plain}, WebAPI: []config.WebAPI{twin, twin}}
+	s := &sink{}
+	r := testRouter(t, cfg, false, map[string]Output{"hook": funcOutput{send: s.send}})
+	defer r.Close()
+	for i := range cfg.WebAPI {
+		if _, err := r.ObservedDispatcher(&cfg.WebAPI[i], newRecordingObserver()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(r.dupKeys) != 0 {
+		t.Fatalf("dupKeys = %v, want none without a spooled output", r.dupKeys)
+	}
+}
