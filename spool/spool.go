@@ -145,7 +145,12 @@ func (s *Spool) load() error {
 		if pos.Seq > seqs[len(seqs)-1] {
 			return errors.New("spool ack file points past the end of the spool")
 		}
-		if !slices.Contains(seqs, pos.Seq) {
+		if pos.Seq < seqs[0] {
+			// The segment holding the position was removed before the ack file
+			// could be updated, as on a full disk. Everything before the oldest
+			// segment was delivered or dropped, so reading starts there.
+			pos = position{Seq: seqs[0]}
+		} else if !slices.Contains(seqs, pos.Seq) {
 			return errors.New("spool ack file points to a missing segment")
 		}
 	}
@@ -163,13 +168,15 @@ func (s *Spool) load() error {
 		}
 		seqs = seqs[1:]
 	}
-	s.pos = pos
 	if len(seqs) == 0 {
-		if pos.Off != 0 {
-			return errors.New("spool ack file points past the end of the spool")
+		if hasAck {
+			// Start after the saved position so sequence numbers never go back.
+			pos = position{Seq: pos.Seq + 1}
 		}
+		s.pos = pos
 		return s.createSegment(pos.Seq)
 	}
+	s.pos = pos
 	for i, seq := range seqs {
 		seg, err := s.loadSegment(seq, i == len(seqs)-1)
 		if err != nil {
@@ -315,6 +322,16 @@ func (s *Spool) persist(p position) error {
 	return err
 }
 
+// persistQuiet is persist for paths that carry on when the save fails: the
+// position has already moved in memory, and the ack file on disk stays
+// behind it, which Open accepts. Only the first failure of a run is logged.
+func (s *Spool) persistQuiet(p position) {
+	wasFailing := s.ackFailing
+	if err := s.persist(p); err != nil && !wasFailing {
+		s.opts.Logf("Spool %s: the read position cannot be saved: %v (further failures are not logged until one succeeds)", s.opts.Name, err)
+	}
+}
+
 // createSegment starts segment seq and makes it the one appended to.
 func (s *Spool) createSegment(seq uint64) error {
 	f, err := os.OpenFile(s.segPath(seq), os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_EXCL, 0o600)
@@ -393,21 +410,21 @@ func (s *Spool) totalBytes() int64 {
 	return total
 }
 
-// enforceSize drops whole segments, oldest first. The ack moves past a
-// segment before the segment is removed, so a crash never leaves the ack
-// pointing at a missing segment.
+// enforceSize drops whole segments, oldest first, until the spool is within
+// MaxBytes. The read position moves past each one in memory; saving it is
+// best effort, because Open accepts an ack file that points at a removed
+// segment and starts at the oldest one left.
 func (s *Spool) enforceSize() {
-	dropped := 0
+	dropped, removed := 0, false
 	for s.totalBytes() > s.opts.MaxBytes && len(s.segs) > 1 {
-		next := position{Seq: s.segs[1].seq}
-		if err := s.persist(next); err != nil {
-			s.opts.Logf("Spool %s: over its size limit, but the read position cannot be saved: %v", s.opts.Name, err)
-			break
-		}
 		dropped += s.segs[0].frames
-		s.pos = next
+		s.pos = position{Seq: s.segs[1].seq}
 		s.pending = nil
 		s.removeOldest()
+		removed = true
+	}
+	if removed {
+		s.persistQuiet(s.pos)
 	}
 	if dropped > 0 {
 		s.dropped += dropped
@@ -430,15 +447,13 @@ func (s *Spool) removeOldest() {
 }
 
 // finishSegment moves the read position to the next segment and removes the
-// current one.
-func (s *Spool) finishSegment() error {
+// current one, which also frees space on a full disk. Saving the position is
+// best effort; see enforceSize.
+func (s *Spool) finishSegment() {
 	next := position{Seq: s.segs[1].seq}
-	if err := s.persist(next); err != nil {
-		return err
-	}
 	s.pos = next
 	s.removeOldest()
-	return nil
+	s.persistQuiet(next)
 }
 
 // Peek returns the oldest frame not yet acked, waiting for one if the spool
@@ -481,9 +496,7 @@ func (s *Spool) next() (payload []byte, ok bool, err error) {
 			if len(s.segs) == 1 {
 				return nil, false, nil
 			}
-			if err := s.finishSegment(); err != nil {
-				return nil, false, err
-			}
+			s.finishSegment()
 			continue
 		}
 		f, err := s.readerFor(seg.seq)
@@ -500,9 +513,7 @@ func (s *Spool) next() (payload []byte, ok bool, err error) {
 					return nil, false, err
 				}
 			}
-			if err := s.finishSegment(); err != nil {
-				return nil, false, err
-			}
+			s.finishSegment()
 			continue
 		}
 		if err != nil {
@@ -510,12 +521,10 @@ func (s *Spool) next() (payload []byte, ok bool, err error) {
 		}
 		next := s.pos.Off + headerSize + int64(len(payload))
 		if s.opts.MaxAge > 0 && s.opts.Now().Sub(time.Unix(0, at)) > s.opts.MaxAge {
-			if err := s.persist(position{Seq: seg.seq, Off: next}); err != nil {
-				return nil, false, err
-			}
 			s.pos.Off = next
 			seg.frames--
 			expired++
+			s.persistQuiet(s.pos)
 			continue
 		}
 		s.pending = &pendingFrame{at: s.pos, next: next}
@@ -555,10 +564,9 @@ func (s *Spool) Ack() error {
 	// The position advances in memory even if the ack file cannot be written,
 	// so a full disk does not make Peek return the same frame forever. The
 	// next successful ack write persists the newer position; a crash before
-	// then only replays frames already sent, which at-least-once allows. The
-	// file on disk never points past memory, so it stays within the data and
-	// at a segment that still exists (a segment is removed only after an ack
-	// write past it succeeded).
+	// then only replays frames already sent, which at-least-once allows.
+	// The file on disk never points past memory. It may point at a segment
+	// already removed, which Open treats as the start of the oldest segment.
 	s.pos = position{Seq: p.at.Seq, Off: p.next}
 	s.segs[0].frames--
 	return s.persist(s.pos)

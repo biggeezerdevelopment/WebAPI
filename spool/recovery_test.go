@@ -186,3 +186,57 @@ func TestZeroFilledTailIsTruncatedSilently(t *testing.T) {
 		t.Fatalf("Dropped = %d", st.Dropped)
 	}
 }
+
+func TestOpenAcceptsAckBeforeOldestSegment(t *testing.T) {
+	dir := t.TempDir()
+	s := openTest(t, dir, Options{SegmentBytes: 40})
+	mustAppend(t, s, "a", "b", "c")
+	_ = s.Close()
+	// As if a full disk let segment 1 be removed but not the ack file updated.
+	if err := os.Remove(segFiles(t, dir)[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAck(dir, position{Seq: 1, Off: 17}); err != nil {
+		t.Fatal(err)
+	}
+	s2 := openTest(t, dir, Options{SegmentBytes: 40})
+	if got := drain(t, s2); !slices.Equal(got, []string{"c"}) {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestOpenWithAckButNoSegmentsStartsAfterIt(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeAck(dir, position{Seq: 5, Off: 40}); err != nil {
+		t.Fatal(err)
+	}
+	s := openTest(t, dir, Options{})
+	mustAppend(t, s, "x")
+	if got := drain(t, s); !slices.Equal(got, []string{"x"}) {
+		t.Fatalf("got %q", got)
+	}
+	if segs := segFiles(t, dir); len(segs) != 1 || filepath.Base(segs[0]) != "0000000000000006.seg" {
+		t.Fatalf("segments = %q, want only segment 6", segs)
+	}
+}
+
+func TestOpenRejectsAckAtMissingMiddleSegment(t *testing.T) {
+	dir := t.TempDir()
+	s := openTest(t, dir, Options{SegmentBytes: 40})
+	mustAppend(t, s, "a", "b", "c", "d", "e") // segments 1, 2 and 3
+	_ = s.Close()
+	segs := segFiles(t, dir)
+	if len(segs) != 3 {
+		t.Fatalf("segments = %q", segs)
+	}
+	if err := os.Remove(segs[1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAck(dir, position{Seq: 2}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Open(dir, Options{MaxBytes: 1 << 20, SegmentBytes: 40, Logf: t.Logf})
+	if err == nil || !strings.Contains(err.Error(), "missing segment") {
+		t.Fatalf("Open = %v", err)
+	}
+}
