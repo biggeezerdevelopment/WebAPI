@@ -1,10 +1,12 @@
 package spool
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -220,7 +222,7 @@ func TestOpenWithAckButNoSegmentsStartsAfterIt(t *testing.T) {
 	}
 }
 
-func TestOpenRejectsAckAtMissingMiddleSegment(t *testing.T) {
+func TestOpenResumesAfterMissingMiddleSegment(t *testing.T) {
 	dir := t.TempDir()
 	s := openTest(t, dir, Options{SegmentBytes: 40})
 	mustAppend(t, s, "a", "b", "c", "d", "e") // segments 1, 2 and 3
@@ -235,8 +237,32 @@ func TestOpenRejectsAckAtMissingMiddleSegment(t *testing.T) {
 	if err := writeAck(dir, position{Seq: 2}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Open(dir, Options{MaxBytes: 1 << 20, SegmentBytes: 40, Logf: t.Logf})
-	if err == nil || !strings.Contains(err.Error(), "missing segment") {
+	var mu sync.Mutex
+	var lines []string
+	s2, err := Open(dir, Options{MaxBytes: 1 << 20, SegmentBytes: 40, Logf: func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}})
+	if err != nil {
 		t.Fatalf("Open = %v", err)
+	}
+	defer s2.Close()
+	if got := drain(t, s2); !slices.Equal(got, []string{"e"}) {
+		t.Fatalf("got %q, want [e]", got)
+	}
+	if _, err := os.Stat(segs[0]); !os.IsNotExist(err) {
+		t.Fatalf("segment 1 still on disk: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	n := 0
+	for _, l := range lines {
+		if strings.Contains(l, "names missing segment 2; resuming at segment 3") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d matching log lines in %q", n, lines)
 	}
 }

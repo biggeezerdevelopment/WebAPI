@@ -73,9 +73,6 @@ type spooler struct {
 	router  *Router
 	minWait time.Duration
 	maxWait time.Duration
-	// ackFailing is true after an ack failure until an ack succeeds. Only the
-	// worker goroutine uses it.
-	ackFailing bool
 	// routed holds the observers of the sources routed to this output. It is
 	// guarded by router.obsMu.
 	routed []DeliveryObserver
@@ -147,7 +144,8 @@ func (s *spooler) run(ctx context.Context) {
 // reportFailure tells the item's source about a failed send. An item that
 // matches no single source (written by an older version, or by a source that
 // is gone or ambiguous) is reported to every source routed to this output, so
-// that a failing output is never hidden from the heartbeat.
+// that a failing output is never hidden from the heartbeat. Such an item's
+// success credits no source, while its failure reaches all of them.
 func (s *spooler) reportFailure(obs DeliveryObserver, err error) {
 	if obs != nil {
 		obs.DeliveryFailed(s.name, err)
@@ -164,7 +162,9 @@ func (r *Router) register(key, name string, obs DeliveryObserver, spools []*spoo
 	r.obsMu.Lock()
 	defer r.obsMu.Unlock()
 	for _, s := range spools {
-		s.routed = append(s.routed, obs)
+		if !slices.Contains(s.routed, obs) {
+			s.routed = append(s.routed, obs)
+		}
 	}
 	if r.dupKeys[key] {
 		return
@@ -195,21 +195,12 @@ func (r *Router) routedTo(s *spooler) []DeliveryObserver {
 	return slices.Clone(s.routed)
 }
 
-// ack acknowledges the current record. A failure is logged once per streak of
-// failures, so a long disk-full outage does not fill the log.
+// ack acknowledges the current record. The spool logs the first failure of a
+// run of failed saves, so a long disk-full outage does not fill the log; a
+// closed spool is a shutdown and is not reported.
 func (s *spooler) ack() {
-	err := s.sp.Ack()
-	if err == nil {
-		s.ackFailing = false
-		return
-	}
-	if errors.Is(err, spool.ErrClosed) {
-		return
-	}
-	if !s.ackFailing {
-		log.Printf("Spool for output %q: %v (further failures are not logged until one succeeds)", s.name, err)
-	}
-	s.ackFailing = true
+	// Any error is already logged by the spool; ErrClosed needs no log.
+	_ = s.sp.Ack()
 }
 
 func (s *spooler) nextWait(wait time.Duration) time.Duration {

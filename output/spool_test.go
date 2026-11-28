@@ -358,10 +358,12 @@ func TestSpoolCreditsSourceAfterReorder(t *testing.T) {
 	r2, cfg2 := spoolSourcesRouter(t, dir, s, b, a) // reordered; a is now index 1
 	defer r2.Close()
 	obsB, obsA := newRecordingObserver(), newRecordingObserver()
-	if _, err := r2.ObservedDispatcher(&cfg2.WebAPI[0], obsB); err != nil {
+	// Register a first: a retry landing between the two registrations would
+	// otherwise be fanned out to b as an unkeyed failure.
+	if _, err := r2.ObservedDispatcher(&cfg2.WebAPI[1], obsA); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r2.ObservedDispatcher(&cfg2.WebAPI[1], obsA); err != nil {
+	if _, err := r2.ObservedDispatcher(&cfg2.WebAPI[0], obsB); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "a failure credited to a", func() bool { _, f := obsA.counts("hook"); return f >= 1 })
@@ -416,12 +418,18 @@ func TestSpoolUnkeyedItemFailuresReachEveryRoutedSource(t *testing.T) {
 
 func TestSpoolDuplicateSourceKeysCreditNoSource(t *testing.T) {
 	twin := config.WebAPI{Enabled: true, Name: "same", Endpoint: "https://x.example", Method: "get"}
+	other := config.WebAPI{Enabled: true, Name: "other", Endpoint: "https://other.example", Method: "get"}
 	s := &sink{down: true}
-	r, cfg := spoolSourcesRouter(t, t.TempDir(), s, twin, twin)
+	r, cfg := spoolSourcesRouter(t, t.TempDir(), s, twin, twin, other)
 	defer r.Close()
 	obs1, obs2 := newRecordingObserver(), newRecordingObserver()
 	d1, _ := r.ObservedDispatcher(&cfg.WebAPI[0], obs1)
 	if _, err := r.ObservedDispatcher(&cfg.WebAPI[1], obs2); err != nil {
+		t.Fatal(err)
+	}
+	obsOther := newRecordingObserver()
+	dOther, err := r.ObservedDispatcher(&cfg.WebAPI[2], obsOther)
+	if err != nil {
 		t.Fatal(err)
 	}
 	d1.Deliver(context.Background(), numbered(0))
@@ -432,7 +440,10 @@ func TestSpoolDuplicateSourceKeysCreditNoSource(t *testing.T) {
 	})
 	s.setDown(false)
 	waitFor(t, "delivery", func() bool { _, got := s.state(); return len(got) == 1 })
-	time.Sleep(50 * time.Millisecond) // the success callback follows the send
+	// The worker sends in order, so once the other source's record is
+	// credited, the twin record's callback has already run.
+	dOther.Deliver(context.Background(), numbered(1))
+	waitFor(t, "the other source's delivery", func() bool { n, _ := obsOther.counts("hook"); return n == 1 })
 	n1, _ := obs1.counts("hook")
 	n2, _ := obs2.counts("hook")
 	if n1 != 0 || n2 != 0 {

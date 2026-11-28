@@ -151,7 +151,19 @@ func (s *Spool) load() error {
 			// segment was delivered or dropped, so reading starts there.
 			pos = position{Seq: seqs[0]}
 		} else if !slices.Contains(seqs, pos.Seq) {
-			return errors.New("spool ack file points to a missing segment")
+			// A segment between two that exist is gone, but only after it was
+			// read, dropped or found corrupt, so it holds nothing undelivered.
+			// Reading resumes at the next segment; the loop below removes the
+			// delivered ones before it.
+			resume := pos.Seq
+			for _, q := range seqs {
+				if q > pos.Seq {
+					resume = q
+					break
+				}
+			}
+			s.opts.Logf("Spool %s: the saved read position names missing segment %d; resuming at segment %d", s.opts.Name, pos.Seq, resume)
+			pos = position{Seq: resume}
 		}
 	}
 	if !hasAck {
@@ -324,12 +336,16 @@ func (s *Spool) persist(p position) error {
 
 // persistQuiet is persist for paths that carry on when the save fails: the
 // position has already moved in memory, and the ack file on disk stays
-// behind it, which Open accepts. Only the first failure of a run is logged.
-func (s *Spool) persistQuiet(p position) {
+// behind it, which Open accepts. Only the first failure of a run is logged;
+// a run ends when a save succeeds. It returns the save's error. Every path
+// that saves the position uses it, so the log has one owner.
+func (s *Spool) persistQuiet(p position) error {
 	wasFailing := s.ackFailing
-	if err := s.persist(p); err != nil && !wasFailing {
+	err := s.persist(p)
+	if err != nil && !wasFailing {
 		s.opts.Logf("Spool %s: the read position cannot be saved: %v (further failures are not logged until one succeeds)", s.opts.Name, err)
 	}
+	return err
 }
 
 // createSegment starts segment seq and makes it the one appended to.
@@ -440,7 +456,8 @@ func (s *Spool) removeOldest() {
 		s.reader = nil
 	}
 	if err := removeFile(s.segPath(seq)); err != nil {
-		// The next Open removes it, because it is before the ack.
+		// The next Open removes it if it is before the saved position, and
+		// resumes after it if it is the saved position.
 		s.opts.Logf("Spool %s: segment %d cannot be removed: %v", s.opts.Name, seq, err)
 	}
 	s.segs = s.segs[1:]
@@ -569,7 +586,7 @@ func (s *Spool) Ack() error {
 	// already removed, which Open treats as the start of the oldest segment.
 	s.pos = position{Seq: p.at.Seq, Off: p.next}
 	s.segs[0].frames--
-	return s.persist(s.pos)
+	return s.persistQuiet(s.pos)
 }
 
 // TakeStats returns the spool's state and resets Dropped.

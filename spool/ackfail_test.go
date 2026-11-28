@@ -2,8 +2,10 @@ package spool
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -158,5 +160,43 @@ func TestAckWriteFailuresLoggedOncePerRun(t *testing.T) {
 	mustAppend(t, s, "z", "w") // "w" drops a segment, and the save fails
 	if n := saveFailures(); n != 2 {
 		t.Fatalf("logged %d save failures over two runs, want 2: %q", n, logs)
+	}
+}
+
+func TestAckFailureRunsAreEachLogged(t *testing.T) {
+	var mu sync.Mutex
+	var lines []string
+	s := openTest(t, t.TempDir(), Options{Logf: func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}})
+	mustAppend(t, s, "a", "b", "c")
+	sw := failAcks(s)
+	step := func(want string, wantErr bool) {
+		t.Helper()
+		p, err := peekWithin(t, s, time.Second)
+		if err != nil || p != want {
+			t.Fatalf("Peek = %q, %v; want %q", p, err, want)
+		}
+		if err := s.Ack(); (err != nil) != wantErr {
+			t.Fatalf("Ack = %v, want error %v", err, wantErr)
+		}
+	}
+	step("a", true)
+	sw.on.Store(false)
+	step("b", false)
+	sw.on.Store(true)
+	step("c", true)
+	mu.Lock()
+	defer mu.Unlock()
+	n := 0
+	for _, l := range lines {
+		if strings.Contains(l, "read position cannot be saved") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("%d failure lines, want 2: %q", n, lines)
 	}
 }
