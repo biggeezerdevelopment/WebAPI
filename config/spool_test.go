@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -198,5 +199,22 @@ func TestSpoolLimitsStillDecodeWithPresenceCheck(t *testing.T) {
 	sp := decodeSpool(t, "spool:\n  enabled: true\n  max_size_mb: 7\n  max_age_hours: 0\n")
 	if !sp.IsEnabled() || sp.MaxBytes() != 7<<20 || sp.MaxAge() != 0 {
 		t.Fatalf("spool = %+v", sp)
+	}
+}
+
+func TestSpoolDirsListsOnlyEnabledSpools(t *testing.T) {
+	cfg := &Config{
+		StateDir:     "/state",
+		APILogRemote: APILogRemote{Enabled: true, Spool: &Spool{Enabled: true}},
+		LogOutputs: []LogOutput{
+			{Name: "on", Enabled: true, Spool: &Spool{Enabled: true}},
+			{Name: "spool-off", Enabled: true, Spool: &Spool{}},
+			{Name: "output-off", Spool: &Spool{Enabled: true}},
+			{Name: "no-block", Enabled: true},
+		},
+	}
+	want := []string{SpoolDir("/state", APILogRemoteOutputName), SpoolDir("/state", "on")}
+	if got := cfg.SpoolDirs(); !slices.Equal(got, want) {
+		t.Fatalf("SpoolDirs = %q, want %q", got, want)
 	}
 }

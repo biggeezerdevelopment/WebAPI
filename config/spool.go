@@ -120,6 +120,22 @@ func SpoolDir(stateDir, output string) string {
 	return filepath.Join(stateDir, "spool", "output-"+hex.EncodeToString(sum[:16]))
 }
 
+// SpoolDirs returns the spool directory of every enabled output whose spool
+// is enabled, apilogremote first and then in config order.
+func (c *Config) SpoolDirs() []string {
+	var dirs []string
+	if c.APILogRemote.Enabled && c.APILogRemote.Spool.IsEnabled() {
+		dirs = append(dirs, SpoolDir(c.StateDir, APILogRemoteOutputName))
+	}
+	for i := range c.LogOutputs {
+		entry := &c.LogOutputs[i]
+		if entry.Enabled && entry.Spool.IsEnabled() {
+			dirs = append(dirs, SpoolDir(c.StateDir, entry.Name))
+		}
+	}
+	return dirs
+}
+
 // validateSpools checks the spool blocks of enabled outputs, and state_dir
 // when any of them is enabled. It does not create the spool directories.
 func (c *Config) validateSpools() error {

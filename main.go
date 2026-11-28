@@ -111,6 +111,7 @@ type options struct {
 	configPath  string
 	checkConfig bool
 	version     bool
+	purgeSpools bool
 }
 
 // parseFlags reads the command line. Usage and errors go to stderr.
@@ -121,11 +122,18 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.StringVar(&opts.configPath, "config", "config.yml", "path to the configuration file")
 	fs.BoolVar(&opts.checkConfig, "check-config", false, "validate the configuration, build outputs and collectors, and exit without polling or writing state")
 	fs.BoolVar(&opts.version, "version", false, "print the version and exit")
+	fs.BoolVar(&opts.purgeSpools, "purge-spools", false, "remove spool directories under state_dir that no enabled spooled output uses, and exit")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
 	if fs.NArg() > 0 {
 		err := fmt.Errorf("unexpected argument %q", fs.Arg(0))
+		fmt.Fprintln(stderr, err)
+		fs.Usage()
+		return options{}, err
+	}
+	if opts.purgeSpools && opts.checkConfig {
+		err := errors.New("-purge-spools cannot be combined with -check-config")
 		fmt.Fprintln(stderr, err)
 		fs.Usage()
 		return options{}, err
@@ -165,6 +173,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	for _, warning := range cfg.OutputWarnings() {
 		logger.Printf("WARNING: %s", warning)
+	}
+	if opts.purgeSpools {
+		if err := purgeSpools(cfg, stdout); err != nil {
+			logger.Printf("Purge spools: %v", err)
+			return 1
+		}
+		return 0
 	}
 
 	a, err := build(cfg, opts.checkConfig)
